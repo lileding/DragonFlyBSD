@@ -386,13 +386,16 @@ int main(void) {
 }
 """)
 
-    def test_private_prepare_uses_lifecycle_protected_vcpu(self):
+    def test_empty_vmspace_claim_precedes_memory_prepare(self):
+        body = function("vmmfs_machine.c", "vmmfs_machine_boot")
+        self.assertIn("if (!atomic_cmpset_ptr(&machine->machine, NULL, runtime))", body)
         run_c(COMMON + r"""
-struct token { int valid, held; };
-struct vmmfs_node { struct vnode *vnode; struct vmmfs_mount *mount; struct token token; struct vmmfs_node *parent; bool dead;  struct lock lock;};
-struct vnode { void *v_data; unsigned refs; };
-struct vmmfs_memory { struct vmmfs_node node; uint64_t size; void *object, *run_vmspace; bool mapped; };
-struct cpu { struct vmmfs_node node; struct token token; void *threads; unsigned active_count, count; };
+struct token { unsigned held; };
+struct vnode { unsigned refs; };
+struct vmmfs_node { struct vnode *vnode; struct lock lock; bool dead; };
+struct vmspace { int unused; };
+struct vmmfs_memory { uint64_t size; void *object; struct vmspace *run_vmspace; };
+struct cpu { struct token token; void *threads; unsigned active_count, count; bool stop_requested; };
 typedef void *vmm_machine_t;
 struct vmmfs_machine {
     struct vmmfs_node node; struct token token; struct vmmfs_memory memory; struct cpu vcpu;
@@ -400,191 +403,147 @@ struct vmmfs_machine {
     bool runtime_releasing, runtime_released; unsigned runtime_references;
     int platform, pciroot, serialroot, rtc;
 };
-struct vmmfs_launch { struct vmmfs_node node; struct token token; };
+struct vmmfs_launch { struct vmmfs_node node; };
 static struct vmmfs_machine machine;
 static struct vmmfs_launch launch;
-static struct vnode cpu_vnode, launch_vnode;
-static unsigned mode, stage, fail_stage;
-static void lwkt_gettoken(struct token *t) { assert(t->valid); ++t->held; }
-static void lwkt_reltoken(struct token *t) { assert(t->valid && t->held); --t->held; }
-static void vref(struct vnode *v) { assert(v == &launch_vnode && v->refs); ++v->refs; }
-static void vrele(struct vnode *v) {
-    assert(v->refs);
-    if (--v->refs == 0 && v == &cpu_vnode) machine.vcpu.token.valid = 0;
-}
-#define bzero(p,n) memset(p,0,n)
-#define kprintf(...) ((void)0)
+static struct vnode launch_vnode;
+static struct vmspace space;
+static int competitor;
+static unsigned mode, stage, fail_stage, spaces, runtimes;
+#define VM_MIN_USER_ADDRESS 0
+#define VMMFS_GPA_MAX 127
 static int next(void) { return ++stage == fail_stage ? ENOMEM : 0; }
-static int vmmfs_launch_create(struct vmmfs_node *parent, uint64_t size,
-    struct vmmfs_launch **v) {
-    (void)size;
-    int error = next(); if (error) return error;
-    launch.node.parent = parent; launch.node.mount = parent->mount; launch_vnode.v_data = &launch;
-    launch_vnode.refs = 1; launch.node.vnode = &launch_vnode; *v = &launch;
-    return 0;
+static void lwkt_gettoken(struct token *t) { ++t->held; }
+static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
+static void vref(struct vnode *v) { assert(v->refs); ++v->refs; }
+static void vrele(struct vnode *v) { assert(v->refs); --v->refs; }
+static struct vmspace *vmspace_alloc(int low, int high) {
+    assert(low==0 && high==127); if(next()) return NULL; ++spaces; return &space;
+}
+static void pmap_del_all_cpus(struct vmspace *v) { assert(v==&space); }
+static void vmspace_rel(struct vmspace *v) { assert(v==&space && spaces==1); --spaces; }
+static int vmm_machine_create(struct vmspace *v, vmm_machine_t *out) {
+    assert(v==&space); int e=next(); if(e) return e;
+    ++runtimes; *out=v; if(mode==1) machine.machine=&competitor; return 0;
+}
+static int vmm_machine_destroy(vmm_machine_t v) { assert(v==&space && runtimes==1); --runtimes; return 0; }
+static bool atomic_cmpset_ptr(vmm_machine_t *p, void *old, void *value) {
+    assert(machine.token.held && machine.vcpu.token.held);
+    if(*p!=old) return false;
+    *p=value; return true;
+}
+static int vmmfs_launch_create(struct vmmfs_node *parent, uint64_t size, struct vmmfs_launch **out) {
+    assert(parent==&machine.node && size==4096 && machine.machine==&space);
+    assert(machine.runtime_references==1 && machine.memory.run_vmspace==&space);
+    if(mode==2) machine.vcpu.stop_requested=true;
+    int e=next(); if(e) return e;
+    launch_vnode.refs=1; launch.node.vnode=&launch_vnode; *out=&launch; return 0;
 }
 static int vmmfs_memory_prepare(struct vmmfs_memory *m, uint64_t size) {
-    (void)size;
-    assert(machine.node.lock.held && !machine.node.dead);
-    assert(machine.vcpu.node.vnode == &cpu_vnode && cpu_vnode.refs == 1);
-    /* Configuration can change, but fixed children cannot disappear. */
-    if (mode == 1) machine.memory.size = size * 2;
-    if (mode == 2) machine.runtime_releasing = true;
-    m->object = m; m->run_vmspace = m;
-    return next();
+    assert(m==&machine.memory && size==4096 && m->run_vmspace==&space);
+    assert(machine.machine==&space && machine.launch==&launch);
+    int e=next(); if(!e) m->object=m; return e;
 }
-static int vmm_machine_create(void *memory, vmm_machine_t *v) { *v = memory; return next(); }
-static int vmmfs_memory_map(struct vmmfs_memory *m) { m->mapped = true; return next(); }
-static int vmmfs_launch_map(struct vmmfs_launch *l, void *o) { (void)l; (void)o; return next(); }
-static int vmm_machine_create_irqchip(void *m) { (void)m; return next(); }
-static int vmm_machine_create_pit(void *m) { (void)m; return next(); }
-static int vmmfs_platform_x64_prepare(int *p, struct vmmfs_memory *m,
-    unsigned count, int *pci, int *serial) {
-    (void)p; (void)m; (void)count; (void)pci; (void)serial; return next();
+static int vmmfs_memory_map(struct vmmfs_memory *m) { assert(m==&machine.memory); return next(); }
+static int vmmfs_launch_map(struct vmmfs_launch *l, void *o) { assert(l==&launch && o==&machine.memory); return next(); }
+static int vmm_machine_create_irqchip(void *m) { assert(m==&space); return next(); }
+static int vmm_machine_create_pit(void *m) { assert(m==&space); return next(); }
+static int vmmfs_platform_x64_prepare(int *p, struct vmmfs_memory *m, unsigned count, int *pci, int *serial) {
+    (void)p; (void)pci; (void)serial; assert(m==&machine.memory && count==1); return next();
 }
 static int vmmfs_rtc_start(int *r, void *m) { (void)r; (void)m; return next(); }
 static int vmmfs_pciroot_start(int *r, void *m) { (void)r; (void)m; return next(); }
 static int vmmfs_serialroot_start(int *r, void *m) { (void)r; (void)m; return next(); }
-static int vmmfs_platform_x64_start(int *r, void *m) { (void)r; (void)m; return next(); }
-static void vmmfs_machine_runtime_put(struct vmmfs_machine *m) { assert(m->runtime_references); --m->runtime_references; }
-static int vmmfs_machine_abort(struct vmmfs_launch *l) {
-    (void)l;
-    if (machine.launch) vrele(machine.launch->node.vnode);
-    machine.launch = NULL; machine.machine = NULL; return 0;
+static int vmmfs_platform_x64_start(int *r, void *m) {
+    (void)r; (void)m; if(mode==3) machine.vcpu.stop_requested=true; return next();
 }
-static void vmmfs_launch_revoke(struct vmmfs_launch *l) { (void)l; }
-static int vmm_machine_destroy(void *m) { (void)m; return 0; }
-static void vmmfs_memory_release(struct vmmfs_memory *m) { (void)m; }
-static int vmmfs_vnode_deactivate(struct vnode *v) { (void)v; return 0; }
-static void vrele(struct vnode *);
-static bool vmmfs_node_deactivate(struct vmmfs_node *n) {
-    if (!n) return true;
-    struct vnode *v = n->vnode;
-    if (vmmfs_vnode_deactivate(v) != 0) return false;
-    vrele(v); return true;
+static void vmmfs_machine_runtime_put(struct vmmfs_machine *m) { assert(m->runtime_references==1); --m->runtime_references; }
+static int vmmfs_machine_release_to_stopped(struct vmmfs_machine *m) {
+    assert(!m->runtime_references); vmm_machine_destroy(m->machine);
+    vmspace_rel(m->memory.run_vmspace); m->memory.run_vmspace=NULL;
+    m->memory.object=NULL; m->machine=NULL; m->vcpu.stop_requested=false; return 0;
+}
+static int vmmfs_machine_abort(struct vmmfs_launch *l) {
+    assert(l==&launch); machine.launch=NULL;
+    vmmfs_machine_release_to_stopped(&machine); vrele(l->node.vnode); return 0;
 }
 int
 """ + function("vmmfs_machine.c", "vmmfs_machine_boot") + r"""
 int main(void) {
-    for (mode = 0; mode != 3; ++mode) {
-        for (fail_stage = 0; fail_stage <= 12; ++fail_stage) {
-            memset(&machine, 0, sizeof(machine)); memset(&launch_vnode, 0, sizeof(launch_vnode));
-            machine.token.valid = machine.vcpu.token.valid = 1;
-            machine.memory.size = 4096; machine.vcpu.count = 1;
-            cpu_vnode.refs = 1; machine.vcpu.node.vnode = &cpu_vnode;
-            stage = 0; struct vmmfs_launch *result = NULL;
-            int error = VMMFS_WORK(&machine, vmmfs_machine_boot(&machine, &result));
-            assert(machine.token.held == 0 && machine.vcpu.token.held == 0);
-            assert(machine.runtime_references == 0);
-            if (error == 0) {
-                assert(mode == 0 && fail_stage == 0 && result == &launch);
-                vmmfs_machine_abort(&launch); vrele(result->node.vnode);
-            } else {
-                assert(result == NULL);
-            }
-            assert(launch_vnode.refs == 0);
-            if (machine.vcpu.node.vnode != NULL) {
-                assert(cpu_vnode.refs == 1); vrele(&cpu_vnode);
-            }
-            assert(cpu_vnode.refs == 0 && machine.vcpu.token.valid == 0);
-        }
+    for(mode=0;mode<4;++mode) for(fail_stage=0;fail_stage<=13;++fail_stage) {
+        memset(&machine,0,sizeof(machine)); memset(&launch_vnode,0,sizeof(launch_vnode));
+        machine.memory.size=4096; machine.vcpu.count=1; stage=spaces=runtimes=0;
+        struct vmmfs_launch *result=NULL;
+        int e=VMMFS_WORK(&machine,vmmfs_machine_boot(&machine,&result));
+        assert(!machine.token.held && !machine.vcpu.token.held && !machine.runtime_references);
+        if(!e) {
+            assert(mode==0 && fail_stage==0 && result==&launch);
+            vmmfs_machine_abort(result); vrele(result->node.vnode);
+        } else assert(!result);
+        assert(!spaces && !runtimes && !launch_vnode.refs);
+        if(mode==1 && stage>=2 && fail_stage!=2) assert(machine.machine==&competitor);
+        else assert(!machine.machine);
     }
-    return 0;
 }
 """)
 
 
-    def test_loader_handoff_retains_its_node(self):
+    def test_nremove_runs_loader_as_launch_continuation(self):
         run_c(COMMON + r"""
-struct token { unsigned held; };
-struct vmmfs_node { struct vnode *vnode; struct token token; bool dead; unsigned references;  struct lock lock;};
+struct vnode { void *v_data; unsigned refs; };
+struct vmmfs_node { struct lock lock; bool dead; struct vnode *vnode; };
 struct vmmfs_loader { struct vmmfs_node node; };
 struct vmmfs_launch { struct vmmfs_node node; };
-struct vnode { unsigned references; void *v_data; };
-struct vmmfs_machine {
-    struct vmmfs_node node; struct token token;
-    struct vmmfs_loader loader;
-    struct vnode *loader_vnode;
-};
-struct ucred { int unused; };
+struct vmmfs_machine { struct vmmfs_node node; struct vmmfs_loader loader; };
+struct namecache { const char *nc_name; size_t nc_nlen; struct vnode *nc_vp; };
+struct nchandle { struct namecache *ncp; };
+struct vop_nremove_args { struct vnode *a_dvp; struct nchandle *a_nch; void *a_cred; };
 static struct vmmfs_machine machine;
-static struct vnode loader_vnode, launch_vnode;
 static struct vmmfs_launch launch;
-static unsigned mode, aborts, runs, waits;
-void lwkt_gettoken(struct token *token) { ++token->held; }
-void lwkt_reltoken(struct token *token) { assert(token->held); --token->held; }
-void vref(struct vnode *vnode) { assert(vnode->references); ++vnode->references; }
-static void vrele(struct vnode *vnode) {
-    assert(vnode->references);
-    if (--vnode->references == 0 && vnode == &loader_vnode) {
-        assert(machine.loader.node.references == 1);
-        machine.loader.node.references = 0;
-    }
+static struct vnode launch_vnode, stopped, replacement;
+static unsigned mode, boots, runs, waits, aborts, unlinks;
+static bool cache_locked;
+static void vref(struct vnode *v) { assert(v->refs); ++v->refs; }
+static void vrele(struct vnode *v) { assert(v->refs); --v->refs; }
+static void cache_unlock(struct nchandle *n) { (void)n; assert(cache_locked); cache_locked=false; }
+static void cache_lock(struct nchandle *n) { (void)n; assert(!cache_locked); cache_locked=true; }
+static void cache_unlink(struct nchandle *n) { (void)n; assert(cache_locked); ++unlinks; }
+static int vmmfs_machine_boot(struct vmmfs_machine *m, struct vmmfs_launch **out) {
+    assert(m == &machine && m->node.lock.held && !cache_locked); ++boots;
+    if (mode == 1) return EBUSY;
+    launch_vnode.refs=1; launch.node.vnode=&launch_vnode; *out=&launch; return 0;
 }
-static int vmmfs_machine_get_item(struct vmmfs_machine *m,
-    const char *name, size_t length, struct vnode **vnodep) {
-    assert(m->node.lock.held && length == 6 && !strcmp(name,"loader"));
-    *vnodep=m->loader.node.vnode;
-    if (*vnodep == NULL) return ENOENT;
-    vref(*vnodep); return 0;
+static int vmmfs_loader_run(struct vmmfs_loader *l, struct vmmfs_launch *s, void *cred) {
+    (void)cred; assert(l == &machine.loader && s == &launch);
+    assert(!machine.node.lock.held && !cache_locked); ++runs;
+    return mode == 2 ? ENOMEM : 0;
 }
-static void remove_loader(void) {
-    assert(machine.loader.node.vnode == &loader_vnode);
-    machine.loader.node.dead = true;
-    machine.loader.node.vnode = NULL;
-    vrele(&loader_vnode);
+static int vmmfs_launch_wait(struct vmmfs_launch *s) {
+    assert(s == &launch && !machine.node.lock.held && !cache_locked); ++waits;
+    return mode == 3 ? EINTR : 0;
 }
-static int vmmfs_machine_boot(struct vmmfs_machine *m, struct vmmfs_launch **result) {
-    assert(m == &machine && !m->token.held);
-    *result = NULL;
-    if (mode == 1) {
-        /* Cancellation and rmdir after boot's admission, before handoff. */
-        remove_loader();
-    }
-    if (mode == 2) return EBUSY;
-    launch_vnode.references = 1; launch_vnode.v_data = &launch;
-    launch.node.vnode = &launch_vnode; *result = &launch; return 0;
-}
-static int vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_launch *session,
-    struct ucred *cred) {
-    (void)cred;
-    assert(loader == &machine.loader && session == &launch);
-    assert(loader->node.lock.held); /* Admission survives allocations in loader_run. */
-    assert(loader->node.references != 0); /* Token must still be initialized. */
-    ++runs;
-    assert(!loader->node.dead);
-    return mode == 4 ? ENOMEM : 0;
-}
-static int vmmfs_launch_wait(struct vmmfs_launch *l) {
-    assert(l == &launch); ++waits; return mode == 5 ? EINTR : 0;
-}
-static int vmmfs_machine_abort(struct vmmfs_launch *l) {
-    assert(l == &launch); ++aborts; return 0;
+static int vmmfs_machine_abort(struct vmmfs_launch *s) {
+    assert(s == &launch && !machine.node.lock.held); ++aborts; return 0;
 }
 static int
-""" + function("vmmfs_machine.c", "vmmfs_machine_start") + r"""
+""" + function("vmmfs_machine.c", "vmmfs_machine_nremove") + r"""
 int main(void) {
-    for (mode=0; mode<=6; ++mode) {
-        memset(&machine,0,sizeof(machine));
-        loader_vnode = (struct vnode){1,&machine.loader};
-        launch_vnode = (struct vnode){0,NULL};
-        machine.loader.node.references = 1;
-        machine.loader.node.vnode = &loader_vnode;
-        aborts=runs=waits=0;
-        if (mode == 6) remove_loader();
-        int error = vmmfs_machine_start(&machine, NULL);
-        int expected = mode==1 ? ENOENT : mode==2 ? EBUSY :
-            mode==4 ? ENOMEM : mode==5 ? EINTR : mode==6 ? ENOENT : 0;
-        assert(error==expected);
-        assert(aborts==(mode==1 || mode==4));
-        assert(waits==(mode==0 || mode==3 || mode==5));
-        assert(runs==(mode!=1 && mode!=2 && mode!=6));
-        assert(!machine.token.held && !launch_vnode.references);
-        if (machine.loader.node.vnode != NULL) {
-            assert(loader_vnode.references==1); remove_loader();
-        }
-        assert(loader_vnode.references==0 && machine.loader.node.references==0);
+    struct vnode parent = { .v_data=&machine };
+    struct namecache name = { "stopped", 7, &stopped };
+    struct nchandle handle = { &name };
+    struct vop_nremove_args args = { &parent, &handle, NULL };
+    for (mode=0; mode<5; ++mode) {
+        machine.node.dead = mode == 4;
+        stopped.refs=1; launch_vnode.refs=0; cache_locked=true;
+        boots=runs=waits=aborts=unlinks=0;
+        int error=vmmfs_machine_nremove(&args);
+        assert(error == (mode==1 ? EBUSY : mode==2 ? ENOMEM : mode==3 ? EINTR : mode==4 ? ENOENT : 0));
+        assert(boots==(mode!=4) && runs==(mode==0 || mode==2 || mode==3));
+        assert(waits==(mode==0 || mode==3) && aborts==(mode==2));
+        assert(unlinks==(mode==0) && stopped.refs==1 && !launch_vnode.refs);
+        assert(cache_locked && !machine.node.lock.held);
     }
+    (void)replacement;
 }
 """)
 

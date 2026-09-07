@@ -169,7 +169,7 @@ struct token { unsigned held; };
 struct vmmfs_node { struct vnode *vnode; struct token token; bool dead; unsigned references;  struct lock lock;};
 struct vnode { void *v_data; unsigned refs; };
 struct vmmfs_stopped { struct vmmfs_node node; };
-struct vmmfs_vcpu { struct vmmfs_node node; };
+struct vmmfs_vcpu { struct vmmfs_node node; struct token token; void *threads; bool stop_requested, reset_requested; };
 struct vmmfs_events { struct vmmfs_node node; };
 struct vmmfs_launch { struct vmmfs_node node; };
 struct vmmfs_machine {
@@ -234,6 +234,12 @@ int main(void) {
     machine.vcpu.node.references = machine.events.node.references = 1;
     assert(vmmfs_machine_request_stop(&machine, "external") == 0 && logs == 1);
     assert(machine.vcpu.node.references == 1 && machine.events.node.references == 1);
+    /* Stop before launch publication records cancellation without dropping PREPARE's pin. */
+    machine.machine = &machine; machine.runtime_references = 1;
+    assert(vmmfs_machine_request_stop(&machine, "external") == 0);
+    assert(machine.vcpu.stop_requested && !machine.vcpu.reset_requested);
+    assert(machine.runtime_references == 1 && !machine.vcpu.token.held && !machine.token.held);
+    machine.machine = NULL; machine.runtime_references = 0;
     /* Fixed children remain usable; runtime release can still reject work. */
     machine.runtime_releasing = true;
     assert(vmmfs_machine_prepare_stopped(&machine) == EBUSY);
@@ -244,7 +250,7 @@ int main(void) {
     struct vmmfs_node *node = candidate.v_data;
     machine.stopped = NULL;
     vmmfs_vnode_discard(&candidate); vmmfs_node_put(node);
-    assert(!allocated && logs == 1 && !machine.token.held);
+    assert(!allocated && logs == 2 && !machine.token.held);
     return 0;
 }
 """)

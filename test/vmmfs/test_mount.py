@@ -82,7 +82,7 @@ class MountInheritance(unittest.TestCase):
                     value = "state" if target == "root->node.mount" else parent_mount(doc, rhs)
                     self.assertEqual(doc.code(statements[index + 1]), target + " = " + value)
                     inherited.append(target)
-        self.assertEqual(len(inherited), 20)
+        self.assertEqual(len(inherited), 19)
 
 
 if __name__ == "__main__":

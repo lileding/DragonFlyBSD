@@ -19,6 +19,11 @@
 #include <sys/uio.h>
 #include <sys/vnode.h>
 
+#include <vm/pmap.h>
+#include <vm/vm.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
+
 #include "vmmfs.h"
 #include "vmmfs_machine.h"
 #include "vmmfs_launch.h"
@@ -37,7 +42,6 @@ static int vmmfs_machine_nresolve(struct vop_nresolve_args *);
 static int vmmfs_machine_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_machine_prepare_stopped(struct vmmfs_machine *);
 static int vmmfs_machine_readdir(struct vop_readdir_args *);
-static int vmmfs_machine_start(struct vmmfs_machine *, struct ucred *);
 static int vmmfs_machine_release_runtime(struct vmmfs_machine *);
 static int vmmfs_machine_release_to_stopped(struct vmmfs_machine *);
 static int vmmfs_machine_create_stopped(struct vmmfs_machine *);
@@ -349,12 +353,19 @@ vmmfs_machine_request_stop(struct vmmfs_machine *machine, const char *reason)
 	bool running, released;
 	int error = 0;
 
+	lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->token);
 	vnode = machine->launch != NULL ? machine->launch->node.vnode : NULL;
 	if (vnode != NULL)
 		vref(vnode);
 	running = vnode == NULL && machine->machine != NULL &&
 	    !machine->runtime_releasing && !machine->runtime_released;
+	/* No launch exists yet: PREPARE consumes the cancellation request. */
+	if (running && machine->vcpu.threads == NULL) {
+		machine->vcpu.stop_requested = true;
+		machine->vcpu.reset_requested = false;
+		running = false;
+	}
 	released = machine->runtime_released;
 	/* Keep this request attached to the runtime admitted above. */
 	if (running)
@@ -362,6 +373,7 @@ vmmfs_machine_request_stop(struct vmmfs_machine *machine, const char *reason)
 	vmmfs_node_hold(&machine->vcpu.node);
 	vmmfs_node_hold(&machine->events.node);
 	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->vcpu.token);
 	if (vnode != NULL) {
 		error = vmmfs_machine_abort(vnode->v_data);
 		vrele(vnode);
@@ -383,16 +395,20 @@ vmmfs_machine_reset(struct vmmfs_machine *machine)
 {
 	if (machine == NULL)
 		return (EINVAL);
+	lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->token);
-	if (machine->machine == NULL || machine->launch != NULL ||
-	    machine->runtime_releasing || machine->runtime_released) {
+	if (machine->vcpu.threads == NULL || machine->machine == NULL ||
+	    machine->launch != NULL || machine->runtime_releasing ||
+	    machine->runtime_released) {
 		lwkt_reltoken(&machine->token);
+		lwkt_reltoken(&machine->vcpu.token);
 		return (EBUSY);
 	}
 	++machine->runtime_references;
 	vmmfs_node_hold(&machine->vcpu.node);
 	vmmfs_node_hold(&machine->events.node);
 	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->vcpu.token);
 	vmmfs_vcpu_request_reset(&machine->vcpu);
 	vmmfs_machine_runtime_put(machine);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_RESET_REQUESTED,
@@ -533,7 +549,8 @@ vmmfs_machine_nremove(struct vop_nremove_args *ap)
 	struct vmmfs_machine *machine = ap->a_dvp->v_data;
 	struct namecache *ncp = ap->a_nch->ncp;
 	struct vnode *original;
-	int error;
+	struct vmmfs_launch *launch;
+	int error, abort_error;
 
 	if (ncp->nc_nlen != sizeof("stopped") - 1 ||
 	    bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) != 0)
@@ -547,7 +564,18 @@ vmmfs_machine_nremove(struct vop_nremove_args *ap)
 	if (original != NULL)
 		vref(original);
 	cache_unlock(ap->a_nch);
-	error = vmmfs_machine_start(machine, ap->a_cred);
+	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine, &launch));
+	if (error == 0) {
+		error = vmmfs_loader_run(&machine->loader, launch, ap->a_cred);
+		if (error == 0)
+			error = vmmfs_launch_wait(launch);
+		else {
+			abort_error = vmmfs_machine_abort(launch);
+			if (abort_error != 0)
+				error = abort_error;
+		}
+		vrele(launch->node.vnode);
+	}
 	cache_lock(ap->a_nch);
 	if (error == 0 && ncp->nc_vp == original)
 		cache_unlink(ap->a_nch);
@@ -697,79 +725,69 @@ vmmfs_machine_readdir(struct vop_readdir_args *ap)
 	return (error);
 }
 
-
 int
 vmmfs_machine_boot(struct vmmfs_machine *machine, struct vmmfs_launch **launchp)
 {
-	struct vmmfs_memory memory;
+	struct vmspace *vmspace;
 	struct vmmfs_launch *launch;
 	struct vnode *vnode;
 	vmm_machine_t runtime;
-	uint32_t count;
 	int error, cleanup_error;
 	bool current;
 
 	*launchp = NULL;
-	bzero(&memory, sizeof(memory));
-	memory.node.parent = &machine->node;
-	memory.node.mount = machine->node.mount;
-	lwkt_gettoken(&machine->token);
-	memory.size = machine->memory.size;
-	lwkt_reltoken(&machine->token);
-	runtime = NULL;
-	vnode = NULL;
-
-	/* Private candidates may sleep; no shared topology is changed yet. */
-	error = vmmfs_launch_create(&machine->node,
-	    memory.size, &launch);
+	/* Create an empty GPA namespace before reading the machine topology. */
+	vmspace = vmspace_alloc(VM_MIN_USER_ADDRESS, VMMFS_GPA_MAX);
+	if (vmspace == NULL)
+		return (ENOMEM);
+	error = vmm_machine_create(vmspace, &runtime);
 	if (error != 0)
-		goto finished;
-	vnode = launch->node.vnode;
-	error = vmmfs_memory_prepare(&memory, memory.size);
-	if (error != 0)
-		goto rejected;
-	error = vmm_machine_create(memory.run_vmspace, &runtime);
-	if (error != 0)
-		goto rejected;
-	error = vmmfs_memory_map(&memory);
-	if (error != 0)
-		goto rejected;
-	error = vmmfs_launch_map(launch, memory.object);
-	if (error != 0)
-		goto rejected;
+		goto free_vmspace;
 
 	lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->token);
-	if (machine->machine != NULL ||
-	    machine->vcpu.threads != NULL || machine->vcpu.active_count != 0 ||
-	    machine->launch != NULL || machine->runtime_releasing ||
-	    machine->runtime_released || machine->runtime_references != 0 ||
-	    machine->memory.size != memory.size || machine->vcpu.count == 0) {
+	if (!atomic_cmpset_ptr(&machine->machine, NULL, runtime)) {
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&machine->vcpu.token);
 		error = EBUSY;
 		goto rejected;
 	}
-	count = machine->vcpu.count;
-	machine->memory.object = memory.object;
-	machine->memory.run_vmspace = memory.run_vmspace;
-	machine->memory.mapped = memory.mapped;
-	memory.object = NULL;
-	memory.run_vmspace = NULL;
-	machine->machine = runtime;
-	machine->launch = launch;
-	vref(vnode);
-	/* Pin PREPARE across token-releasing platform allocations. */
+	machine->memory.run_vmspace = vmspace;
+	/* Keep cancellation from releasing resources while PREPARE builds them. */
 	++machine->runtime_references;
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&machine->vcpu.token);
 
-	error = vmm_machine_create_irqchip(runtime);
+	error = vmmfs_launch_create(&machine->node, machine->memory.size, &launch);
+	if (error != 0) {
+		vmmfs_machine_runtime_put(machine);
+		cleanup_error = vmmfs_machine_release_to_stopped(machine);
+		if (cleanup_error != 0)
+			error = cleanup_error;
+		return (error);
+	}
+	vnode = launch->node.vnode;
+	lwkt_gettoken(&machine->vcpu.token);
+	lwkt_gettoken(&machine->token);
+	machine->launch = launch;
+	vref(vnode);
+	error = machine->vcpu.stop_requested ? ECANCELED : 0;
+	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->vcpu.token);
+
+	if (error == 0)
+		error = vmmfs_memory_prepare(&machine->memory, machine->memory.size);
+	if (error == 0)
+		error = vmmfs_memory_map(&machine->memory);
+	if (error == 0)
+		error = vmmfs_launch_map(launch, machine->memory.object);
+	if (error == 0)
+		error = vmm_machine_create_irqchip(runtime);
 	if (error == 0)
 		error = vmm_machine_create_pit(runtime);
 	if (error == 0)
 		error = vmmfs_platform_x64_prepare(&machine->platform,
-		    &machine->memory, count, &machine->pciroot,
+		    &machine->memory, machine->vcpu.count, &machine->pciroot,
 		    &machine->serialroot);
 	if (error == 0)
 		error = vmmfs_rtc_start(&machine->rtc, runtime);
@@ -779,9 +797,11 @@ vmmfs_machine_boot(struct vmmfs_machine *machine, struct vmmfs_launch **launchp)
 		error = vmmfs_serialroot_start(&machine->serialroot, runtime);
 	if (error == 0)
 		error = vmmfs_platform_x64_start(&machine->platform, runtime);
+	lwkt_gettoken(&machine->vcpu.token);
 	lwkt_gettoken(&machine->token);
-	current = machine->launch == launch;
+	current = machine->launch == launch && !machine->vcpu.stop_requested;
 	lwkt_reltoken(&machine->token);
+	lwkt_reltoken(&machine->vcpu.token);
 	vmmfs_machine_runtime_put(machine);
 	if (error == 0 && !current)
 		error = ECANCELED;
@@ -796,50 +816,16 @@ vmmfs_machine_boot(struct vmmfs_machine *machine, struct vmmfs_launch **launchp)
 	goto finished;
 
 rejected:
-	/* No published runtime owns these candidates. */
-	vmmfs_launch_revoke(launch);
-	if (runtime != NULL) {
-		cleanup_error = vmm_machine_destroy(runtime);
-		if (cleanup_error != 0)
-			panic("vmmfs: empty candidate destroy: %d", cleanup_error);
-	}
-	vmmfs_memory_release(&memory);
-	(void)vmmfs_node_deactivate(&launch->node);
+	/* The losing candidate never owned any shared machine resources. */
+	cleanup_error = vmm_machine_destroy(runtime);
+	if (cleanup_error != 0)
+		panic("vmmfs: empty candidate destroy: %d", cleanup_error);
+free_vmspace:
+	pmap_del_all_cpus(vmspace);
+	vmspace_rel(vmspace);
 finished:
 	return (error);
 }
-
-static int
-vmmfs_machine_start(struct vmmfs_machine *machine, struct ucred *cred)
-{
-	struct vnode *loader_vnode;
-	struct vmmfs_launch *launch;
-	int error, abort_error;
-
-	error = VMMFS_WORK(machine,
-	    vmmfs_machine_get_item(machine, "loader", 6, &loader_vnode));
-	if (error != 0)
-		return (error);
-	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine, &launch));
-	if (error != 0) {
-		vrele(loader_vnode);
-		return (error);
-	}
-	error = VMMFS_WORK((struct vmmfs_loader *)loader_vnode->v_data,
-	    vmmfs_loader_run(loader_vnode->v_data, launch, cred));
-	vrele(loader_vnode);
-	if (error == 0)
-		error = vmmfs_launch_wait(launch);
-	else {
-		abort_error = vmmfs_machine_abort(launch);
-		if (abort_error != 0)
-			error = abort_error;
-	}
-	vrele(launch->node.vnode);
-	return (error);
-}
-
-
 
 int
 vmmfs_machine_abort(struct vmmfs_launch *launch)

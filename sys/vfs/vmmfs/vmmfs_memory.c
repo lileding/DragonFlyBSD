@@ -29,7 +29,6 @@
 #include "vmmfs_pciroot.h"
 
 #define VMMFS_MEMORY_MODE 0644
-#define VMMFS_GPA_MAX ((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
 
 static int vmmfs_memory_map_object(struct vmmfs_memory *, struct vm_object *,
 	uint64_t, uint64_t, uint64_t, vm_prot_t);
@@ -171,12 +170,11 @@ int
 vmmfs_memory_prepare(struct vmmfs_memory *memory, uint64_t size)
 {
 	struct vm_object *object;
-	struct vmspace *vmspace;
 
 	if (memory == NULL)
 		return (EINVAL);
 	if (memory->object != NULL || memory->boot_vmspace != NULL ||
-	    memory->run_vmspace != NULL)
+	    memory->run_vmspace == NULL)
 		return (EBUSY);
 	if (size == 0 || (size & PAGE_MASK) != 0)
 		return (EINVAL);
@@ -185,19 +183,7 @@ vmmfs_memory_prepare(struct vmmfs_memory *memory, uint64_t size)
 	if (object == NULL)
 		return (ENOMEM);
 	vm_object_set_flag(object, OBJ_NOSPLIT);
-	/*
-	 * Keep the complete GPA namespace available.  RAM is mapped later around
-	 * the fixed VMMFS x64 PCI hole.
-	 */
-	vmspace = vmspace_alloc(VM_MIN_USER_ADDRESS, VMMFS_GPA_MAX);
-	if (vmspace == NULL) {
-		vm_object_deallocate(object);
-		return (ENOMEM);
-	}
-	/* VMM transforms this empty pmap to NPT before RAM is mapped into it. */
-	pmap_maybethreaded(vmspace_pmap(vmspace));
 	memory->object = object;
-	memory->run_vmspace = vmspace;
 	return (0);
 }
 

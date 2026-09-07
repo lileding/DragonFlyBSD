@@ -12,6 +12,8 @@
 
 #include <vm/vm.h>
 
+#define VMMFS_GPA_MAX ((vm_offset_t)127 * 1024 * 1024 * 1024 * 1024)
+
 struct vmmfs_mount;
 struct vm_object;
 struct vmspace;
@@ -20,6 +22,7 @@ struct vmmfs_memory;
 
 int vmmfs_memory_init(struct vmmfs_node *,
 	struct vmmfs_memory *);
+/* Allocate RAM backing in the runtime vmspace already supplied by boot. */
 int vmmfs_memory_prepare(struct vmmfs_memory *, uint64_t);
 int vmmfs_memory_map(struct vmmfs_memory *);
 int vmmfs_memory_snapshot(struct vmmfs_memory *);
