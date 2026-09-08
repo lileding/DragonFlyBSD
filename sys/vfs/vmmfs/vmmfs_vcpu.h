@@ -50,6 +50,10 @@ int vmmfs_vcpu_prepare(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 void vmmfs_vcpu_run(struct vmmfs_vcpu *);
 int vmmfs_vcpu_reset(struct vmmfs_vcpu *, vmm_machine_t,
 	const struct vmm_cpustate *bsp_state);
+/* Asynchronous hard stop; no thread group means no-op, including request flags.
+ * A warm-reset group remains stoppable while its VMM instances are absent.
+ * The caller records the request event.
+ */
 void vmmfs_vcpu_request_stop(struct vmmfs_vcpu *);
 void vmmfs_vcpu_request_reset(struct vmmfs_vcpu *);
 

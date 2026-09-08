@@ -159,45 +159,39 @@ int main(void) {
 }
 """)
 
-    def test_stop_uses_fixed_children_and_preserves_runtime_admission(self):
+    def test_stop_is_local_and_idle_is_noop(self):
         run_c(COMMON + r"""
-struct vmmfs_vcpu { int token; void *threads; bool start_ready; };
-struct vmmfs_machine {
-    struct vmmfs_vcpu vcpu;
-    int token, events;
-    bool runtime_releasing, runtime_released;
-    unsigned runtime_references;
-};
-static unsigned stopped, recovered, logs;
-#define VMMFS_MACHINE_EVENT_STOP_REQUESTED 1
-static void lwkt_gettoken(int *t) { ++*t; }
+struct vmmfs_vcpu_thread { void *vcpu; };
+struct vmmfs_vcpu { int token; struct vmmfs_vcpu_thread *threads;
+    unsigned count; bool stop_requested, reset_requested; };
+static unsigned kicks, wakes;
+static struct vmmfs_vcpu group;
+static void lwkt_gettoken(int *t) { assert(!*t); ++*t; }
 static void lwkt_reltoken(int *t) { assert(*t); --*t; }
-static void vmmfs_vcpu_request_stop(struct vmmfs_vcpu *v) {
-    assert(v->token && v->threads); ++stopped;
+static void vmmfs_vcpu_thread_kick(struct vmmfs_vcpu_thread *t) {
+    assert(group.token && t->vcpu); ++kicks;
 }
-static void vmmfs_machine_runtime_put(struct vmmfs_machine *m) {
-    assert(m->runtime_references==1); --m->runtime_references;
-}
-static void vmmfs_events_log(int *e, int verb, const char *format, const char *reason) {
-    (void)e; (void)format; (void)reason; assert(verb==1); ++logs;
-}
-int
-""" + function("vmmfs_machine.c", "vmmfs_machine_request_stop") + r"""
+static void wakeup(void *p) { assert(p == &group); ++wakes; }
+void
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_request_stop") + r"""
 int main(void) {
-    struct vmmfs_machine m = {0};
-    assert(!vmmfs_machine_request_stop(&m,"prepare"));
-    assert(!vmmfs_machine_request_stop(&m,"loading"));
-    assert(!stopped && !recovered && !m.runtime_references);
-    m.vcpu.threads=&m;
-    assert(!vmmfs_machine_request_stop(&m,"handoff"));
-    assert(stopped==1 && !m.runtime_references);
-    m.vcpu.start_ready=true;
-    assert(!vmmfs_machine_request_stop(&m,"running"));
-    assert(stopped==2 && !m.runtime_references);
-    m.runtime_releasing=true;
-    assert(!vmmfs_machine_request_stop(&m,"released"));
-    assert(stopped==2 && recovered==0 && logs==5);
-    assert(!m.token && !m.vcpu.token);
+    struct vmmfs_vcpu_thread threads[2] = {{&group}, {NULL}};
+    group.count = 2; group.reset_requested = true;
+    vmmfs_vcpu_request_stop(&group);
+    assert(!group.stop_requested && group.reset_requested && !kicks && !wakes);
+    group.threads = threads;
+    vmmfs_vcpu_request_stop(&group);
+    assert(group.stop_requested && !group.reset_requested && kicks == 1);
+    vmmfs_vcpu_request_stop(&group);
+    assert(group.stop_requested && kicks == 2);
+    /* Reset temporarily removes all VMM instances, not the live workers. */
+    threads[0].vcpu = NULL; group.stop_requested = false; group.reset_requested = true;
+    vmmfs_vcpu_request_stop(&group);
+    assert(group.stop_requested && !group.reset_requested && kicks == 2);
+    group.threads = NULL; group.stop_requested = false;
+    unsigned before = wakes;
+    vmmfs_vcpu_request_stop(&group);
+    assert(!group.stop_requested && wakes == before && !group.token);
     return 0;
 }
 """)

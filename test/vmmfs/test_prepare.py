@@ -265,8 +265,8 @@ int main(void) {
             body = function("vmmfs_machine.c", name)
             self.assertNotIn("vmmfs_stopped_init", body)
             self.assertNotIn("vmmfs_stopped_create", body)
-        for name in ("vmmfs_machine_post_launch", "vmmfs_machine_vcpu_stopped"):
-            self.assertIn("cache_inval_vp", function("vmmfs_machine.c", name))
+        self.assertIn("cache_inval_vp", function("vmmfs_machine.c", "vmmfs_machine_post_launch"))
+        self.assertIn("cache_setvp", function("vmmfs_machine.c", "vmmfs_machine_stopped"))
 
     def test_empty_vmspace_claim_precedes_memory_prepare(self):
         body = function("vmmfs_machine.c", "vmmfs_machine_boot")

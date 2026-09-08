@@ -43,7 +43,6 @@ struct vmmfs_machine {
 	 * NULL is stopped.  A non-NULL instance owns the running topology.
 	 */
 	vmm_machine_t machine;
-	bool runtime_releasing;
 	/* Admitted runtime work, or topology removal until registry detach. */
 	u_int runtime_references;
 	struct vmm_cpustate boot_state;
@@ -65,9 +64,6 @@ int vmmfs_machine_create(struct vmmfs_node *,
 /* Requests a warm reset without rerunning the loader. */
 int vmmfs_machine_reset(struct vmmfs_machine *);
 
-/* Requests terminal power-off from an external VOP or a guest runtime event. */
-int vmmfs_machine_request_stop(struct vmmfs_machine *, const char *);
-
 /* Atomically admits a private launch and prepares its platform. */
 int vmmfs_machine_boot(struct vmmfs_machine *,
 	void (*)(struct vmmfs_launch *), struct vmmfs_launch **);
@@ -76,6 +72,6 @@ void vmmfs_machine_post_launch(struct vmmfs_launch *);
 
 /* The BSP invokes these after every other vCPU has reached its barrier. */
 int vmmfs_machine_vcpu_reset(struct vmmfs_machine *);
-void vmmfs_machine_vcpu_stopped(struct vmmfs_machine *);
+void vmmfs_machine_stopped(struct vmmfs_machine *);
 
 #endif /* VMMFS_MACHINE_H */

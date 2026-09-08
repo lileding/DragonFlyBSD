@@ -56,7 +56,12 @@ vmmfs_stopped_setattr(struct vop_setattr_args *ap)
 
 	/* The operation belongs to the machine; this node remains persistent. */
 	return (VMMFS_WORK(machine,
-	    vmmfs_machine_request_stop(machine, "external")));
+	    ({
+		vmmfs_vcpu_request_stop(&machine->vcpu);
+		vmmfs_events_log(&machine->events,
+		    VMMFS_MACHINE_EVENT_STOP_REQUESTED, "reason=external");
+		0;
+	    })));
 }
 
 int

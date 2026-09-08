@@ -325,6 +325,10 @@ vmmfs_vcpu_request_stop(struct vmmfs_vcpu *vcpu)
 	if (vcpu == NULL)
 		return;
 	lwkt_gettoken(&vcpu->token);
+	if (vcpu->threads == NULL) {
+		lwkt_reltoken(&vcpu->token);
+		return;
+	}
 	vcpu->stop_requested = true;
 	vcpu->reset_requested = false;
 	for (index = 0; index < vcpu->count; ++index) {
@@ -601,7 +605,7 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 	lwkt_reltoken(&vcpu->token);
 
 	/* Keep the vCPU lifetime gate closed until runtime publication completes. */
-	vmmfs_machine_vcpu_stopped(machine);
+	vmmfs_machine_stopped(machine);
 
 	lwkt_gettoken(&vcpu->token);
 	threads = vcpu->threads;
@@ -864,7 +868,10 @@ out:
 		    VMMFS_MACHINE_EVENT_VCPU_FAILED, "index=%u error=%d",
 		    thread->index, error);
 	}
-	if (!vmmfs_vcpu_is_stop_requested(vcpu))
-		(void)vmmfs_machine_request_stop(vmmfs_vcpu_machine(vcpu), "guest-exit");
+	if (!vmmfs_vcpu_is_stop_requested(vcpu)) {
+		vmmfs_vcpu_request_stop(vcpu);
+		vmmfs_events_log(&vmmfs_vcpu_machine(vcpu)->events,
+		    VMMFS_MACHINE_EVENT_STOP_REQUESTED, "reason=guest-exit");
+	}
 	vmmfs_vcpu_thread_stop(thread);
 }

@@ -10,6 +10,7 @@
 #include <machine/limits.h>
 #include <sys/mount.h>
 #include <sys/namecache.h>
+#include <sys/nlookup.h>
 #include <sys/param.h>
 #include <sys/proc.h>
 #include <sys/stat.h>
@@ -43,8 +44,6 @@ static int vmmfs_machine_get_item(struct vmmfs_node *, const char *,
 static int vmmfs_machine_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_machine_read_item(struct vmmfs_node *, uint64_t,
 	struct vmmfs_node_item *);
-static void vmmfs_machine_runtime_put(struct vmmfs_machine *);
-static void vmmfs_machine_runtime_wait(struct vmmfs_machine *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
 static bool vmmfs_machine_deactivate(struct vmmfs_node *);
 
@@ -204,61 +203,6 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	kfree(machine, M_VMMFS);
 }
 
-static void
-vmmfs_machine_runtime_put(struct vmmfs_machine *machine)
-{
-	bool wake;
-
-	KKASSERT(machine != NULL);
-	lwkt_gettoken(&machine->token);
-	KKASSERT(machine->runtime_references != 0);
-	wake = --machine->runtime_references == 0;
-	lwkt_reltoken(&machine->token);
-	if (wake)
-		wakeup(machine);
-}
-
-static void
-vmmfs_machine_runtime_wait(struct vmmfs_machine *machine)
-{
-	KKASSERT(machine != NULL);
-	for (;;) {
-		tsleep_interlock(machine, 0);
-		lwkt_gettoken(&machine->token);
-		if (machine->runtime_references == 0) {
-			crit_enter();
-			tsleep_remove(curthread);
-			crit_exit();
-			lwkt_reltoken(&machine->token);
-			return;
-		}
-		lwkt_reltoken(&machine->token);
-		(void)tsleep(machine, PINTERLOCKED, "vmmfsrt", 0);
-	}
-}
-
-int
-vmmfs_machine_request_stop(struct vmmfs_machine *machine, const char *reason)
-{
-	bool running;
-
-	lwkt_gettoken(&machine->vcpu.token);
-	lwkt_gettoken(&machine->token);
-	running = machine->vcpu.threads != NULL &&
-		!machine->runtime_releasing;
-	if (running)
-		++machine->runtime_references;
-	lwkt_reltoken(&machine->token);
-	if (running)
-		vmmfs_vcpu_request_stop(&machine->vcpu);
-	lwkt_reltoken(&machine->vcpu.token);
-	if (running)
-		vmmfs_machine_runtime_put(machine);
-	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOP_REQUESTED,
-				  "reason=%s", reason);
-	return (0);
-}
-
 int
 vmmfs_machine_reset(struct vmmfs_machine *machine)
 {
@@ -272,11 +216,9 @@ static int
 vmmfs_machine_touch_stopped(struct vmmfs_machine *machine,
 	struct vnode **vnodep)
 {
-	int error;
-
-	error = vmmfs_machine_request_stop(machine, "external");
-	if (error != 0)
-		return (error);
+	vmmfs_vcpu_request_stop(&machine->vcpu);
+	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOP_REQUESTED,
+	    "reason=external");
 	vref(machine->stopped.node.vnode);
 	*vnodep = machine->stopped.node.vnode;
 	return (0);
@@ -560,28 +502,38 @@ vmmfs_machine_post_launch(struct vmmfs_launch *launch)
 }
 
 void
-vmmfs_machine_vcpu_stopped(struct vmmfs_machine *machine)
+vmmfs_machine_stopped(struct vmmfs_machine *machine)
 {
-	if (machine == NULL)
-		return;
-	lwkt_gettoken(&machine->token);
-	machine->runtime_releasing = true;
-	lwkt_reltoken(&machine->token);
-	vmmfs_machine_runtime_wait(machine);
+	vmm_machine_t runtime = machine->machine;
+	struct nchandle parent, stopped;
+	struct nlcomponent name = {
+		.nlc_nameptr = machine->name,
+		.nlc_namelen = strlen(machine->name),
+	};
+
 	(void)vmmfs_platform_x64_stop(&machine->platform);
 	(void)vmmfs_serialroot_stop(&machine->serialroot);
 	(void)vmmfs_pciroot_stop(&machine->pciroot);
 	(void)vmmfs_rtc_stop(&machine->rtc);
 	/* The worker barrier has destroyed every vCPU. */
-	(void)vmm_machine_destroy(machine->machine);
+	(void)vmm_machine_destroy(runtime);
 	vmmfs_memory_release(&machine->memory);
-	cache_inval_vp(machine->node.vnode, CINV_CHILDREN);
-	lwkt_gettoken(&machine->token);
-	machine->runtime_releasing = false;
-	machine->machine = NULL;
-	lwkt_reltoken(&machine->token);
+	/* The namespace is known; do not reverse-scan it through NFS helpers. */
+	parent = cache_nlookup(&machine->node.mount->mount->mnt_ncmountpt, &name);
+	cache_setunresolved(&parent);
+	cache_setvp(&parent, machine->node.vnode);
+	cache_unlock(&parent);
+	name.nlc_nameptr = "stopped";
+	name.nlc_namelen = sizeof("stopped") - 1;
+	stopped = cache_nlookup(&parent, &name);
+	cache_setunresolved(&stopped);
+	cache_setvp(&stopped, machine->stopped.node.vnode);
+	cache_put(&stopped);
+	cache_drop(&parent);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOPPED,
-				  "reason=vcpu");
+	    "reason=vcpu");
+	/* The BSP alone releases this runtime after all shared cleanup. */
+	(void)atomic_cmpset_ptr(&machine->machine, runtime, NULL);
 }
 
 int
