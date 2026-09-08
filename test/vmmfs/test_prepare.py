@@ -74,7 +74,7 @@ static bool vmmfs_vcpu_is_stop_requested(struct vmmfs_vcpu *p) {
 static struct vmmfs_machine *vmmfs_vcpu_machine(struct vmmfs_vcpu *p) {
     (void)p; return &machine;
 }
-static int vmmfs_machine_vcpu_reset(struct vmmfs_machine *p) {
+static int vmmfs_machine_reset(struct vmmfs_machine *p) {
     (void)p; assert(!"test must use the AP path"); return 0;
 }
 static void vmmfs_vcpu_request_stop(struct vmmfs_vcpu *p) { p->stop_requested = true; }

@@ -395,5 +395,10 @@ vmmfs_events_store(struct vmmfs_node *node, const char *buffer,
 	    bcmp(buffer, "reset\n", length) == 0)))
 		return (EINVAL);
 	return (VMMFS_WORK(vmmfs_events_machine(events),
-	    vmmfs_machine_reset(vmmfs_events_machine(events))));
+	    ({
+		vmmfs_events_log(events, VMMFS_MACHINE_EVENT_RESET_REQUESTED,
+		    "reason=external");
+		vmmfs_vcpu_request_reset(&vmmfs_events_machine(events)->vcpu);
+		0;
+	    })));
 }

@@ -669,7 +669,7 @@ vmmfs_vcpu_thread_reset(struct vmmfs_vcpu_thread *thread)
 	if (vmmfs_vcpu_is_stop_requested(vcpu))
 		return;
 	vmmfs_vcpu_thread_destroy(thread);
-	error = vmmfs_machine_vcpu_reset(vmmfs_vcpu_machine(vcpu));
+	error = vmmfs_machine_reset(vmmfs_vcpu_machine(vcpu));
 	if (error != 0) {
 		vmmfs_events_log(&vmmfs_vcpu_machine(vcpu)->events,
 		    VMMFS_MACHINE_EVENT_RESET_FAILED, "error=%d", error);

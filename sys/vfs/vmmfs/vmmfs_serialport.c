@@ -221,11 +221,6 @@ vmmfs_serialport_deactivate(struct vmmfs_node *node)
             return (false);
         }
         error = machine->machine != NULL ? EBUSY : 0;
-        if (error == 0) {
-            /* Keep boot excluded until the parent detaches the port. */
-            port->topology_reference = true;
-            ++machine->runtime_references;
-        }
         lwkt_reltoken(&machine->token);
         lwkt_reltoken(&parent->token);
         if (error != 0)
@@ -267,7 +262,6 @@ vmmfs_serialport_drop(struct vmmfs_node *node)
     cdev_t dev = port->dev;
 
     KKASSERT(port->entry == NULL);
-    KKASSERT(!port->topology_reference);
     KKASSERT(port->machine == NULL);
     KKASSERT(!port->stopping);
     KKASSERT(port->control_count == 0);

@@ -44,7 +44,7 @@ struct vmmfs_machine {
 struct vmmfs_pciroot { struct vmmfs_node node; struct token token; };
 struct vmmfs_pcislot {
     struct vmmfs_node node; struct token token; unsigned bdf; void *entry, *resources;
-    bool topology_reference;
+
     struct child descriptor, config, events;
     struct vnode *descriptor_vnode, *config_vnode, *events_vnode;
 };

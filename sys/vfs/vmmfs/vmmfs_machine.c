@@ -203,15 +203,6 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 	kfree(machine, M_VMMFS);
 }
 
-int
-vmmfs_machine_reset(struct vmmfs_machine *machine)
-{
-	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_RESET_REQUESTED,
-				  "reason=external");
-	vmmfs_vcpu_request_reset(&machine->vcpu);
-	return (0);
-}
-
 static int
 vmmfs_machine_touch_stopped(struct vmmfs_machine *machine,
 	struct vnode **vnodep)
@@ -537,7 +528,7 @@ vmmfs_machine_stopped(struct vmmfs_machine *machine)
 }
 
 int
-vmmfs_machine_vcpu_reset(struct vmmfs_machine *machine)
+vmmfs_machine_reset(struct vmmfs_machine *machine)
 {
 	vmm_machine_t old_machine;
 	vmm_machine_t runtime_machine;

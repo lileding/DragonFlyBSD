@@ -150,11 +150,6 @@ vmmfs_serialroot_release_entry(struct vmmfs_serialroot *root,
 
 	lwkt_gettoken(&machine->token);
 	port->entry = NULL;
-	if (port->topology_reference) {
-		KKASSERT(machine->runtime_references != 0);
-		port->topology_reference = false;
-		--machine->runtime_references;
-	}
 	lwkt_reltoken(&machine->token);
 }
 

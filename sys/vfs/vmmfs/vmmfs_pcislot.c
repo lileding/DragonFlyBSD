@@ -137,7 +137,6 @@ vmmfs_pcislot_drop(struct vmmfs_node *node)
 	KKASSERT(slot != NULL);
 	KKASSERT(slot->node.references == 0);
 	KKASSERT(slot->entry == NULL);
-	KKASSERT(!slot->topology_reference);
 	KKASSERT(slot->resources == NULL);
 	KKASSERT(slot->descriptor.node.drop == NULL);
 	KKASSERT(slot->config.node.drop == NULL);
@@ -166,11 +165,6 @@ vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 			return (false);
 		}
 		error = machine->machine != NULL ? EBUSY : 0;
-		if (error == 0) {
-			/* The parent releases this when it detaches the slot. */
-			slot->topology_reference = true;
-			++machine->runtime_references;
-		}
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&parent->token);
 		if (error != 0)

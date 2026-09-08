@@ -86,7 +86,7 @@ struct vmmfs_machine {
     struct vmmfs_node node; struct token token;
     void *machine;
     bool runtime_releasing, runtime_released;
-    unsigned runtime_references;
+
     struct { struct vmmfs_node node; struct token token; unsigned active_count; void *threads; } vcpu;
     struct { struct vmmfs_node node; } id_node, memory, loader, boot, stopped, pciroot, serialroot, events;
 };

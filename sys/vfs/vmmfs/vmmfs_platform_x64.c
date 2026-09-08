@@ -630,9 +630,9 @@ vmmfs_platform_x64_write(vmm_vcpu_t vcpu, void *argument,
 		    VMMFS_MACHINE_EVENT_STOP_REQUESTED, "reason=guest-s5");
 	}
 	if (reset) {
-		if (vmmfs_machine_reset(platform->machine) != 0)
-			vmmfs_events_log(&platform->machine->events,
-			    VMMFS_MACHINE_EVENT_GUEST_RESET_REQUEST_FAILED, NULL);
+		vmmfs_events_log(&platform->machine->events,
+		    VMMFS_MACHINE_EVENT_RESET_REQUESTED, "reason=guest-reset");
+		vmmfs_vcpu_request_reset(&platform->machine->vcpu);
 	}
 	return (0);
 }

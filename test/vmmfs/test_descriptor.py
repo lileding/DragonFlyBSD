@@ -66,7 +66,7 @@ int main(void) {
 }
 """)
 
-    def test_transaction_keeps_admission_until_completion(self):
+    def test_transaction_commits_or_cleans_up(self):
         run_c(COMMON + r"""
 #include <stdlib.h>
 struct token { unsigned held; };
@@ -77,7 +77,7 @@ struct vmmfs_pcislot_descriptor {
     struct vmmfs_node node; bool updating, committed; uint64_t generation;
     struct vmmfs_pcislot_descriptor_value value; struct vmmfs_pcislot_auth *auth;
 };
-struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine; unsigned runtime_references; };
+struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine;  };
 struct vmmfs_pciroot { int unused; };
 struct vmmfs_pcislot {
     struct vmmfs_node node; struct token token; struct vmmfs_pcislot_descriptor descriptor;
@@ -87,7 +87,7 @@ static struct vmmfs_machine machine;
 static struct vmmfs_pciroot pciroot;
 static struct vmmfs_pcislot slot;
 static struct vmmfs_pcislot_auth old_auth, new_auth;
-static unsigned mode, allocations, revoked, boot_attempts, boot_rejected, notifications;
+static unsigned mode, allocations, revoked, notifications;
 #define M_VMMFS 0
 #define M_WAITOK 0
 #define M_ZERO 0
@@ -106,11 +106,6 @@ static void kfree(void *p, int tag) {
 }
 static void lwkt_gettoken(struct token *t) { ++t->held; }
 static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
-static void boot_attempt(void) {
-    ++boot_attempts;
-    if (machine.runtime_references != 0) ++boot_rejected;
-    else machine.machine = &machine;
-}
 static int vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *s,
     const char *text, size_t length, struct vmmfs_pcislot_descriptor_value *v) {
     assert(s==&slot && text && length==1);
@@ -119,7 +114,6 @@ static int vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *s,
 static int vmmfs_pcislot_auth_create(struct vmmfs_pcislot *s,
     uint64_t generation, struct vmmfs_pcislot_auth **p) {
     assert(s==&slot && generation==8 && slot.descriptor.updating);
-    if (mode==1) boot_attempt();
     if (mode==5) return EMFILE;
     if (mode==6) slot.node.dead=true; /* Parent close must drain admitted child work. */
     new_auth.valid=true; new_auth.references=1; *p=&new_auth; return 0;
@@ -129,23 +123,22 @@ static void vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *auth) {
     assert(auth->references==1); auth->references=0; auth->valid=false;
     if (auth==&old_auth) {
         ++revoked;
-        if (mode==2) boot_attempt();
         if (mode==3) slot.node.dead=true; /* Concurrent close drains this update. */
     }
 }
 void wakeup(void *p) {
-    assert((p==&machine || p==&slot.descriptor) && !slot.descriptor.updating);
-    assert(machine.runtime_references==(mode==8));
+    assert(p==&slot.descriptor && !slot.descriptor.updating);
+
 }
 static void vmmfs_pcislot_events_reset(int *events) {
     assert(events==&slot.events); ++notifications;
-    assert(slot.descriptor.updating && machine.runtime_references==1+(mode==8));
+    assert(slot.descriptor.updating);
 }
 static void vmmfs_pcislot_config_descriptor_changed(int *config,
     uint64_t generation, bool committed) {
     assert(config==&slot.config && generation==8);
     assert(committed==slot.descriptor.committed); ++notifications;
-    assert(slot.descriptor.updating && machine.runtime_references==1+(mode==8));
+    assert(slot.descriptor.updating);
 }
 static void vmmfs_pciroot_invalidate_slot(struct vmmfs_pciroot *r,
     struct vmmfs_pcislot *s) {
@@ -154,19 +147,20 @@ static void vmmfs_pciroot_invalidate_slot(struct vmmfs_pciroot *r,
 static void vmmfs_pcislot_events_log(int *e, int verb, const char *format, ...) {
     assert(e==&slot.events && format);
     assert(verb==VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED || verb==VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED);
-    assert(slot.descriptor.updating && machine.runtime_references==1+(mode==8)); ++notifications;
+    assert(slot.descriptor.updating); ++notifications;
 }
 static int
 """ + function("vmmfs_pcislot_descriptor.c", "vmmfs_pcislot_descriptor_store") + r"""
 int main(void) {
-    for (mode=0; mode<=8; ++mode) {
+    const unsigned modes[] = {0, 3, 4, 5, 6, 7};
+    for (unsigned i=0; i<sizeof(modes)/sizeof(modes[0]); ++i) {
+        mode=modes[i];
         memset(&machine,0,sizeof(machine)); memset(&slot,0,sizeof(slot));
-        machine.runtime_references = mode==8; /* Another slot is updating. */
         old_auth=(struct vmmfs_pcislot_auth){true,1};
         new_auth=(struct vmmfs_pcislot_auth){false,0};
         slot.descriptor.auth=&old_auth; slot.descriptor.committed=true;
         slot.descriptor.generation=7; slot.descriptor.value.marker=1;
-        allocations=revoked=boot_attempts=boot_rejected=notifications=0;
+        allocations=revoked=notifications=0;
         int error=vmmfs_pcislot_descriptor_store(&slot.descriptor.node,"x",mode==7 ? 0 : 1);
         if (mode==4 || mode==5) {
             assert(error==(mode==4 ? EINVAL : EMFILE));
@@ -176,12 +170,12 @@ int main(void) {
         } else {
             assert(error==0 && slot.descriptor.generation==8 && revoked==1);
             assert(!old_auth.valid && notifications==4);
-            assert(machine.machine==NULL && boot_attempts==boot_rejected);
+            assert(machine.machine==NULL);
             if (mode==7) assert(slot.descriptor.auth==NULL && !slot.descriptor.committed);
             else assert(slot.descriptor.auth==&new_auth && new_auth.valid &&
                 slot.descriptor.value.marker==2 && slot.descriptor.committed);
         }
-        assert(allocations==0 && machine.runtime_references==(mode==8) && !slot.descriptor.updating);
+        assert(allocations==0 && !slot.descriptor.updating);
         assert(!slot.token.held && !machine.token.held);
     }
 }

@@ -44,7 +44,6 @@ struct vmmfs_pcislot {
 	struct vmmfs_pciroot_slot *entry;
 	uint16_t bdf;
 	/* Owned until registry detach; protected by the machine token. */
-	bool topology_reference;
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;
 	struct vmmfs_pcislot_events events;

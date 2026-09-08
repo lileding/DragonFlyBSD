@@ -11,9 +11,9 @@
 #include <sys/tree.h>
 #include <sys/types.h>
 
-#include "vmmfs_node.h"
 #include <dev/virtual/vmm/vmm.h>
 
+#include "vmmfs_node.h"
 #include "vmmfs_events.h"
 #include "vmmfs_boot.h"
 #include "vmmfs_loader.h"
@@ -38,13 +38,8 @@ struct vmmfs_machine {
 	struct lwkt_token token;
 	char name[NAME_MAX + 1];
 	uint32_t id;
-	struct vmmfs_machine_id id_node;
-	/*
-	 * NULL is stopped.  A non-NULL instance owns the running topology.
-	 */
 	vmm_machine_t machine;
-	/* Admitted runtime work, or topology removal until registry detach. */
-	u_int runtime_references;
+	struct vmmfs_machine_id id_node;
 	struct vmm_cpustate boot_state;
 	struct vmmfs_vcpu vcpu;
 	struct vmmfs_memory memory;
@@ -61,9 +56,6 @@ struct vmmfs_machine {
 int vmmfs_machine_create(struct vmmfs_node *,
 	const char *, size_t, struct vmmfs_machine **);
 
-/* Requests a warm reset without rerunning the loader. */
-int vmmfs_machine_reset(struct vmmfs_machine *);
-
 /* Atomically admits a private launch and prepares its platform. */
 int vmmfs_machine_boot(struct vmmfs_machine *,
 	void (*)(struct vmmfs_launch *), struct vmmfs_launch **);
@@ -71,7 +63,8 @@ int vmmfs_machine_boot(struct vmmfs_machine *,
 void vmmfs_machine_post_launch(struct vmmfs_launch *);
 
 /* The BSP invokes these after every other vCPU has reached its barrier. */
-int vmmfs_machine_vcpu_reset(struct vmmfs_machine *);
+/* Rebuild runtime and restore the boot snapshot without rerunning the loader. */
+int vmmfs_machine_reset(struct vmmfs_machine *);
 void vmmfs_machine_stopped(struct vmmfs_machine *);
 
 #endif /* VMMFS_MACHINE_H */

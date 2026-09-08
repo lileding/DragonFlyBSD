@@ -182,11 +182,6 @@ vmmfs_pciroot_release_entry(struct vmmfs_pciroot *root,
 
 	lwkt_gettoken(&machine->token);
 	slot->entry = NULL;
-	if (slot->topology_reference) {
-		KKASSERT(machine->runtime_references != 0);
-		slot->topology_reference = false;
-		--machine->runtime_references;
-	}
 	lwkt_reltoken(&machine->token);
 }
 

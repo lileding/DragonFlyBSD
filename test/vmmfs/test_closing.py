@@ -11,9 +11,9 @@ struct vmmfs_node { struct vmmfs_node *parent; struct token token; bool dead;  s
 struct tty { struct token t_token; unsigned t_state, t_line; };
 struct vmmfs_serialroot { struct vmmfs_node node; struct token token; };
 struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine;
-    unsigned runtime_references; };
+     };
 struct vmmfs_serialport { struct vmmfs_node node; struct token token;
-    void *entry; bool topology_reference, destroying; unsigned control_count;
+    void *entry; bool destroying; unsigned control_count;
     struct tty tty; };
 static struct vmmfs_machine machine;
 static struct vmmfs_serialroot root;
@@ -31,7 +31,6 @@ static void lwkt_gettoken(struct token *t) {
     /* Blocking acquisitions are permitted only after admission commits. */
     assert(t == &port.token || t == &port.tty.t_token);
     assert(port.node.dead && port.node.token.held == 1);
-    assert(root.node.dead || port.topology_reference || port.entry == NULL);
     ++blocks; ++t->held;
 }
 static void lwkt_reltoken(struct token *t) { assert(t->held); --t->held; }
@@ -67,19 +66,17 @@ int main(void) {
     assert(vmmfs_serialport_deactivate(&port.node) == false);
     contended = &machine.token;
     assert(vmmfs_serialport_deactivate(&port.node) == false);
-    assert(!blocks && !revoked && !retired && !machine.runtime_references);
+    assert(!blocks && !revoked && !retired);
     assert(root.token.held == 0 && machine.token.held == 0);
     contended = NULL;
     port.control_count = 1; port.tty.t_state = TS_ISOPEN;
     assert(vmmfs_serialport_deactivate(&port.node) == true);
-    assert(machine.runtime_references == 1 && port.topology_reference);
     assert(revoked == 1 && retired == 1 && port.control_count == 0);
     /* Parent closure obeys the parent's admission decision, with no veto. */
-    machine.runtime_references = 0; port.topology_reference = false;
     root.node.dead = true; machine.node.dead = true;
     port.entry = NULL; /* Parent detached the registry entry first. */
     assert(vmmfs_serialport_deactivate(&port.node) == true);
-    assert(!machine.runtime_references && revoked == 2 && retired == 2);
+    assert(revoked == 2 && retired == 2);
     assert(port.node.token.held == 1 && !port.token.held && !port.tty.t_token.held);
 }
 """)

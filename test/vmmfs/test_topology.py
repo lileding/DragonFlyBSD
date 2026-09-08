@@ -53,8 +53,8 @@ struct token { unsigned held; };
 struct vnode { void *v_data; };
 struct vmmfs_node { struct vnode *vnode; struct vmmfs_node *parent; struct token token; bool dead;
     int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);  struct lock lock;};
-struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine; unsigned runtime_references; };
-struct vmmfs_pcislot { struct vmmfs_node node; struct token token; unsigned bdf; bool topology_reference; void *entry;
+struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine;  };
+struct vmmfs_pcislot { struct vmmfs_node node; struct token token; unsigned bdf;  void *entry;
     struct { struct vmmfs_node node; } descriptor, config, events; };
 struct vmmfs_pciroot_slot { struct vnode *vnode; struct vmmfs_pcislot *slot; };
 struct registry { struct vmmfs_pciroot_slot *slots; };
@@ -83,7 +83,6 @@ static void vrele(struct vnode *v) { (void)v; }
 static void kfree(void *p, int tag) { (void)tag; free(p); }
 static void vmmfs_pcislot_power_off(struct vmmfs_pcislot *s) {
     assert(s->node.dead && s->token.held == 1);
-    assert(machine.runtime_references == (registered ? 1U : 0U));
 }
 static int vmmfs_vnode_deactivate(struct vnode *v) {
     assert(v == &child && slot.token.held == 1);
@@ -112,47 +111,39 @@ int main(void) {
     root.registry = &registry;
     registered = true; slot.entry = &slot; machine.machine = &machine;
     assert(vmmfs_pcislot_deactivate(&slot.node) == false);
-    assert(machine.runtime_references == 0);
     machine.machine = NULL; machine.node.dead = true;
     /* Cascade detaches the entry before closing its child. */
     registered = false; slot.entry = NULL;
     root.node.dead = true;
     assert(vmmfs_pcislot_deactivate(&slot.node) == true && closed == 3);
-    assert(machine.runtime_references == 0 && !slot.topology_reference);
     root.node.dead = false; machine.node.dead = false;
     registered = true; slot.entry = &slot;
     contended = &root.token;
     assert(vmmfs_pcislot_deactivate(&slot.node) == false);
-    assert(machine.runtime_references == 0 && closed == 3);
     contended = &machine.token;
     assert(vmmfs_pcislot_deactivate(&slot.node) == false);
-    assert(machine.runtime_references == 0 && closed == 3);
     assert(root.token.held == 0 && machine.token.held == 0);
     contended = NULL;
     assert(vmmfs_pcislot_deactivate(&slot.node) == true);
-    assert(machine.runtime_references == 1);
     registry.slots = malloc(sizeof(*registry.slots));
     registry.slots->vnode = &vnode; registry.slots->slot = &slot;
     vmmfs_pciroot_remove_item(&root.node, "0000:00:01.0", 12);
-    assert(machine.runtime_references == 0 && registry.slots == NULL);
     registered = false; slot.entry = NULL; machine.machine = &machine;
     assert(vmmfs_pcislot_deactivate(&slot.node) == true);
-    assert(machine.runtime_references == 0);
     registry.slots = malloc(sizeof(*registry.slots));
     registry.slots->vnode = &vnode; registry.slots->slot = &slot;
     vmmfs_pciroot_remove_item(&root.node, "0000:00:01.0", 12);
-    assert(machine.runtime_references == 0);
     return 0;
 }
 """)
 
 
-    def test_serial_reservation_release(self):
+    def test_serial_entry_release(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
 struct vmmfs_node { struct vnode *vnode; struct token token;  struct lock lock; bool dead;};
-struct vmmfs_machine { struct vmmfs_node node; struct token token; unsigned runtime_references; };
-struct vmmfs_serialport { bool topology_reference; void *entry; };
+struct vmmfs_machine { struct vmmfs_node node; struct token token;  };
+struct vmmfs_serialport {  void *entry; };
 struct vmmfs_serialroot_port { struct vmmfs_serialport *port; };
 struct vmmfs_serialroot { struct vmmfs_node node; struct token token; };
 static struct vmmfs_machine machine;
@@ -167,14 +158,11 @@ int main(void) {
     struct vmmfs_serialroot root = {0};
     struct vmmfs_serialport port = {0};
     struct vmmfs_serialroot_port entry = { &port };
+    port.entry = &entry;
     vmmfs_serialroot_release_entry(&root, &entry);
-    assert(machine.runtime_references == 0);
-    machine.runtime_references = 2;
-    port.topology_reference = true;
+    assert(port.entry == NULL && !machine.token.held);
     vmmfs_serialroot_release_entry(&root, &entry);
-    assert(machine.runtime_references == 1 && !port.topology_reference);
-    vmmfs_serialroot_release_entry(&root, &entry);
-    assert(machine.runtime_references == 1);
+    assert(port.entry == NULL && !machine.token.held);
     return 0;
 }
 """)

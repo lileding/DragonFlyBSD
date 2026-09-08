@@ -266,8 +266,6 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 		error = EBUSY;
 		goto failed;
 	}
-	/* Keep boot and machine teardown outside this transaction. */
-	++machine->runtime_references;
 	descriptor->updating = true;
 	updating = true;
 	generation = descriptor->generation + 1;
@@ -326,14 +324,9 @@ failed:
 finished:
 	if (updating) {
 		lwkt_gettoken(&slot->token);
-		lwkt_gettoken(&machine->token);
 		descriptor->updating = false;
-		KKASSERT(machine->runtime_references != 0);
-		--machine->runtime_references;
-		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&slot->token);
 		wakeup(descriptor);
-		wakeup(machine);
 	}
 	if (value != NULL)
 		kfree(value, M_VMMFS);
