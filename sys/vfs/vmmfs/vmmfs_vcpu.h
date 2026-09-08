@@ -44,6 +44,8 @@ struct vmmfs_vcpu {
 
 int vmmfs_vcpu_init(struct vmmfs_node *,
 	struct vmmfs_vcpu *);
+/* True once the worker group is absent and no workers remain active. */
+bool vmmfs_vcpu_is_stopped(struct vmmfs_vcpu *);
 /* Prepare all workers paused; run releases the completed group. */
 int vmmfs_vcpu_prepare(struct vmmfs_vcpu *, uint32_t, vmm_machine_t,
 	const struct vmm_cpustate *);

@@ -239,10 +239,7 @@ vmmfs_machine_get_item(struct vmmfs_node *node,
 		vnode = machine->serialroot.node.vnode;
 	else if (length == sizeof("stopped") - 1 &&
 	    bcmp(name, "stopped", sizeof("stopped") - 1) == 0) {
-		lwkt_gettoken(&machine->vcpu.token);
-		visible = machine->vcpu.threads == NULL ||
-		    machine->vcpu.threads[0].vcpu == NULL;
-		lwkt_reltoken(&machine->vcpu.token);
+		visible = vmmfs_vcpu_is_stopped(&machine->vcpu);
 		if (!visible)
 			return (ENOENT);
 		vnode = machine->stopped.node.vnode;
@@ -319,14 +316,11 @@ vmmfs_machine_read_item(struct vmmfs_node *node, uint64_t index,
 			item->type = DT_REG;
 			break;
 		case 6:
-			lwkt_gettoken(&machine->vcpu.token);
-			if (machine->vcpu.threads == NULL ||
-				machine->vcpu.threads[0].vcpu == NULL) {
+			if (vmmfs_vcpu_is_stopped(&machine->vcpu)) {
 				item->inode = machine->stopped.node.inode;
 				bcopy("stopped", item->name, sizeof("stopped"));
 				item->type = DT_REG;
 			}
-			lwkt_reltoken(&machine->vcpu.token);
 			break;
 		case 7:
 			item->inode = machine->pciroot.node.inode;

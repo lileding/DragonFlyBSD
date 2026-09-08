@@ -50,21 +50,21 @@ static int vmmfs_vcpu_complete_absent_memory(struct vmmfs_vcpu_thread *,
 static void vmmfs_vcpu_thread_main(void *, struct trapframe *);
 static void vmmfs_vcpu_drop(struct vmmfs_node *);
 
+bool
+vmmfs_vcpu_is_stopped(struct vmmfs_vcpu *vcpu)
+{
+	bool stopped;
+
+	lwkt_gettoken(&vcpu->token);
+	stopped = vcpu->threads == NULL && vcpu->active_count == 0;
+	lwkt_reltoken(&vcpu->token);
+	return (stopped);
+}
+
 static bool
 vmmfs_vcpu_deactivate(struct vmmfs_node *node)
 {
-	struct vmmfs_vcpu *vcpu = (struct vmmfs_vcpu *)node;
-	int error;
-
-	lwkt_gettoken(&vcpu->token);
-	/* Runtime is gone; the BSP may still be finishing its last callbacks. */
-	while (vcpu->active_count != 0 || vcpu->threads != NULL) {
-		error = tsleep(vcpu, 0, "vmmvcpudrain", 0);
-		if (error != 0)
-			kprintf("vmmfs: vCPU close drain: %d\n", error);
-	}
-	lwkt_reltoken(&vcpu->token);
-	return (true);
+	return (vmmfs_vcpu_is_stopped((struct vmmfs_vcpu *)node));
 }
 
 static int
@@ -584,12 +584,6 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 		wakeup(vcpu);
 		exit1(0);
 	}
-	lwkt_reltoken(&vcpu->token);
-
-	/* Keep the vCPU lifetime gate closed until runtime publication completes. */
-	vmmfs_machine_stopped(machine);
-
-	lwkt_gettoken(&vcpu->token);
 	threads = vcpu->threads;
 	vcpu->threads = NULL;
 	vcpu->runtime_machine = NULL;
@@ -602,6 +596,8 @@ vmmfs_vcpu_thread_stop(struct vmmfs_vcpu_thread *thread)
 	wakeup(vcpu);
 	lwkt_reltoken(&vcpu->token);
 	kfree(threads, M_VMMFS);
+	/* Publish stopped only after the worker has finished using its group. */
+	vmmfs_machine_stopped(machine);
 	exit1(0);
 }
 

@@ -81,34 +81,39 @@ int main(void) {
 }
 """)
 
-    def test_vcpu_close_drains_tail_without_veto(self):
+    def test_vcpu_close_uses_stopped_predicate(self):
         run_c(COMMON + r"""
 struct token { unsigned held; };
-struct vmmfs_node { struct token token; bool dead;  struct lock lock;};
+struct vmmfs_node { int unused; };
 struct vmmfs_vcpu { struct vmmfs_node node; struct token token;
     unsigned active_count; void *threads; };
-static struct vmmfs_vcpu cpu;
-static unsigned waited;
 #define lwkt_gettoken(t) (++(t)->held)
 #define lwkt_reltoken(t) (--(t)->held)
-#define kprintf printf
-int tsleep(void *channel, int flags, const char *name, int timeout) {
-    assert(channel == &cpu && flags == 0 && timeout == 0);
-    assert(cpu.node.dead && cpu.node.token.held == 1 && cpu.token.held == 1);
-    (void)name; ++waited; cpu.active_count = 0; cpu.threads = NULL;
-    return 0;
-}
+bool
+""" + function("vmmfs_vcpu.c", "vmmfs_vcpu_is_stopped") + r"""
 static bool
 """ + function("vmmfs_vcpu.c", "vmmfs_vcpu_deactivate") + r"""
 int main(void) {
-    cpu.node.dead = true; cpu.node.token.held = 1;
-    cpu.active_count = 1; cpu.threads = &cpu;
-    assert(vmmfs_vcpu_deactivate(&cpu.node) == true);
-    assert(waited == 1 && cpu.node.dead && cpu.node.token.held == 1);
-    assert(cpu.token.held == 0);
-    assert(vmmfs_vcpu_deactivate(&cpu.node) == true && waited == 1);
+    struct vmmfs_vcpu cpu = {0};
+    for (unsigned active = 0; active < 2; ++active) {
+        for (unsigned allocated = 0; allocated < 2; ++allocated) {
+            cpu.active_count = active;
+            cpu.threads = allocated ? &cpu : NULL;
+            bool stopped = !active && !allocated;
+            assert(vmmfs_vcpu_is_stopped(&cpu) == stopped);
+            assert(vmmfs_vcpu_deactivate(&cpu.node) == stopped);
+            assert(cpu.token.held == 0);
+        }
+    }
 }
 """)
+
+    def test_worker_finishes_before_machine_stopped(self):
+        body = function("vmmfs_vcpu.c", "vmmfs_vcpu_thread_stop")
+        before, after = body.split("vmmfs_machine_stopped(machine);", 1)
+        self.assertIn("vcpu->threads = NULL;", before)
+        self.assertIn("kfree(threads, M_VMMFS);", before)
+        self.assertNotIn("vcpu->", after)
 
     def test_descriptor_close_drains_commit(self):
         run_c(COMMON + r"""
