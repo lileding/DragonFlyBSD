@@ -1476,8 +1476,8 @@ int main(void) {
         start = header.index("struct vmmfs_node {")
         node = balanced(header, header.index("{", start))
         for field in ("parent", "lock", "references", "deactivate", "drop",
-                      "load", "store", "get_item", "read_item", "create_item",
-                      "remove_item"):
+                      "load", "store", "get_item", "read_item", "create_object",
+                      "remove_object"):
             self.assertRegex(node, r"\b" + field + r"\b")
         for path in SOURCE.glob("*.[ch]"):
             self.assertNotIn("struct vmmfs_branch", path.read_text(), path.name)

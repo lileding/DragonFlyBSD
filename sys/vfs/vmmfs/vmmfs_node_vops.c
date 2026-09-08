@@ -134,12 +134,12 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 	error = vmmfs_node_vop_branch(ap->a_dvp, &node);
 	if (error != 0)
 		return (error);
-	if (node->create_item == NULL || node->remove_item == NULL)
+	if (node->create_object == NULL || node->remove_object == NULL)
 		return (EOPNOTSUPP);
 	if (ap->a_vap->va_type != VDIR)
 		return (EINVAL);
 	ncp = ap->a_nch->ncp;
-	error = VMMFS_CALL(node, create_item, ap->a_dvp->v_mount, ncp->nc_name, ncp->nc_nlen, &vnode);
+	error = VMMFS_CALL(node, create_object, ncp->nc_name, ncp->nc_nlen, &vnode);
 	if (error != 0)
 		return (error);
 	if (vnode == NULL)
@@ -151,12 +151,12 @@ vmmfs_node_nmkdir(struct vop_nmkdir_args *ap)
 		 * made it busy, retain the registry entry for normal resolution.
 		 */
 		if (vmmfs_node_deactivate(vnode->v_data)) {
-			cleanup_error = VMMFS_CALL(node, remove_item,
+			cleanup_error = VMMFS_CALL(node, remove_object,
 			    ncp->nc_name, ncp->nc_nlen);
 			if (cleanup_error != 0 && cleanup_error != ENOENT)
 				kprintf("vmmfs: mkdir rollback: %d\n", cleanup_error);
 		} else {
-			vrele(vnode); /* Veto retains the create_item reference. */
+			vrele(vnode); /* Veto retains the create_object reference. */
 		}
 		return (error);
 	}
@@ -179,7 +179,7 @@ vmmfs_node_nrmdir(struct vop_nrmdir_args *ap)
 	error = vmmfs_node_vop_branch(ap->a_dvp, &node);
 	if (error != 0)
 		return (error);
-	if (node->remove_item == NULL)
+	if (node->remove_object == NULL)
 		return (EOPNOTSUPP);
 	ncp = ap->a_nch->ncp;
 	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vnode);
@@ -194,8 +194,47 @@ vmmfs_node_nrmdir(struct vop_nrmdir_args *ap)
 		vrele(vnode);
 		return (EBUSY);
 	}
-	error = VMMFS_CALL(node, remove_item, ncp->nc_name, ncp->nc_nlen);
+	error = VMMFS_CALL(node, remove_object, ncp->nc_name, ncp->nc_nlen);
 	if (error == 0)
 		cache_unlink(ap->a_nch);
+	return (error);
+}
+
+int
+vmmfs_node_ncreate(struct vop_ncreate_args *ap)
+{
+	struct vmmfs_node *node = ap->a_dvp->v_data;
+	struct namecache *ncp = ap->a_nch->ncp;
+	struct vnode *vnode;
+	int error;
+
+	if (ap->a_vap->va_type != VREG)
+		return (EINVAL);
+	error = VMMFS_CALL(node, create_item, ncp->nc_name, ncp->nc_nlen,
+	    &vnode);
+	if (error != 0)
+		return (error);
+	error = vn_lock(vnode, LK_EXCLUSIVE);
+	if (error != 0) {
+		vrele(vnode);
+		return (error);
+	}
+	cache_setunresolved(ap->a_nch);
+	*ap->a_vpp = vnode;
+	return (0);
+}
+
+int
+vmmfs_node_nremove(struct vop_nremove_args *ap)
+{
+	struct vmmfs_node *node = ap->a_dvp->v_data;
+	struct namecache *ncp = ap->a_nch->ncp;
+	int error;
+
+	/* The callback may complete asynchronously and update this name. */
+	cache_unlock(ap->a_nch);
+	error = VMMFS_CALL(node, remove_item, ncp->nc_name, ncp->nc_nlen,
+	    ap->a_cred);
+	cache_lock(ap->a_nch);
 	return (error);
 }

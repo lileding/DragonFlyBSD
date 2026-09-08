@@ -16,8 +16,8 @@ def call_macro():
 class Work(unittest.TestCase):
     def test_admitted_callbacks_do_not_repeat_dead_gate(self):
         for owner, verbs in {
-            'root': ('get_item', 'read_item', 'create_item'),
-            'pciroot': ('get_item', 'read_item', 'create_item'),
+            'root': ('get_item', 'read_item', 'create_object'),
+            'pciroot': ('get_item', 'read_item', 'create_object'),
             'pcislot_descriptor': ('store',),
             'machine': ('get_item',),
             'pcislot': ('get_item', 'read_item'),

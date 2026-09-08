@@ -55,9 +55,9 @@ static int vmmfs_pciroot_get_item(struct vmmfs_node *, const char *, size_t,
 	struct vnode **);
 static int vmmfs_pciroot_read_item(struct vmmfs_node *, uint64_t,
 	struct vmmfs_node_item *);
-static int vmmfs_pciroot_create_item(struct vmmfs_node *, struct mount *,
+static int vmmfs_pciroot_create_object(struct vmmfs_node *,
 	const char *, size_t, struct vnode **);
-static int vmmfs_pciroot_remove_item(struct vmmfs_node *, const char *,
+static int vmmfs_pciroot_remove_object(struct vmmfs_node *, const char *,
 	size_t);
 static int vmmfs_pciroot_config_address_read(vmm_vcpu_t, void *,
 	struct vmm_io_read *);
@@ -140,8 +140,8 @@ vmmfs_pciroot_init(struct vmmfs_node *parent,
 	vmmfs_node_hold(parent);
 	pciroot->node.get_item = vmmfs_pciroot_get_item;
 	pciroot->node.read_item = vmmfs_pciroot_read_item;
-	pciroot->node.create_item = vmmfs_pciroot_create_item;
-	pciroot->node.remove_item = vmmfs_pciroot_remove_item;
+	pciroot->node.create_object = vmmfs_pciroot_create_object;
+	pciroot->node.remove_object = vmmfs_pciroot_remove_object;
 	pciroot->node.inode = vmmfs_root_allocate_inode(root);
 	pciroot->node.mode = VMMFS_PCIROOT_MODE;
 	pciroot->node.size = 0;
@@ -671,7 +671,7 @@ vmmfs_pciroot_read_item(struct vmmfs_node *node, uint64_t index,
 }
 
 static int
-vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
+vmmfs_pciroot_create_object(struct vmmfs_node *node,
 	const char *name, size_t namelen, struct vnode **vnodep)
 {
 	struct vmmfs_pciroot *root = (struct vmmfs_pciroot *)node;
@@ -703,7 +703,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 		entry->slot = slot;
 		RB_INSERT(vmmfs_pcislot_tree, &root->registry->slots, entry);
 		entry->slot->entry = entry;
-		vref(vnode); /* create_item caller, independent of registry. */
+		vref(vnode); /* create_object caller, independent of registry. */
 	}
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&root->token);
@@ -717,7 +717,7 @@ vmmfs_pciroot_create_item(struct vmmfs_node *node, struct mount *mount,
 }
 
 static int
-vmmfs_pciroot_remove_item(struct vmmfs_node *node, const char *name,
+vmmfs_pciroot_remove_object(struct vmmfs_node *node, const char *name,
 	size_t namelen)
 {
 	struct vmmfs_pciroot *pciroot;

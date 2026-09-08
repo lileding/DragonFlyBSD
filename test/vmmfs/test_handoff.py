@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Verify create_item retains its vnode through the VOP handoff."""
+"""Verify create_object retains its vnode through the VOP handoff."""
 import unittest
 from test_regress import COMMON, function, run_c
 
 class CreateHandoff(unittest.TestCase):
     def test_producers_acquire_reference_before_unlock(self):
         for filename, name, insertion in (
-            ("vmmfs_root.c", "vmmfs_root_create_item", "RB_INSERT("),
-            ("vmmfs_pciroot.c", "vmmfs_pciroot_create_item", "entry->slot->entry = entry;"),
+            ("vmmfs_root.c", "vmmfs_root_create_object", "RB_INSERT("),
+            ("vmmfs_pciroot.c", "vmmfs_pciroot_create_object", "entry->slot->entry = entry;"),
         ):
             body = function(filename, name)
             start = body.index(insertion)
@@ -23,9 +23,9 @@ struct namecache { const char *nc_name; size_t nc_nlen; };
 struct nchandle { struct namecache *ncp; };
 struct vattr { int va_type; };
 struct vmmfs_node { struct vnode *vnode;
-    int (*create_item)(struct vmmfs_node *, struct mount *,
+    int (*create_object)(struct vmmfs_node *,
         const char *, size_t, struct vnode **);
-    int (*remove_item)(struct vmmfs_node *, const char *, size_t);
+    int (*remove_object)(struct vmmfs_node *, const char *, size_t);
  struct lock lock; bool dead;};
 struct vop_nmkdir_args {
     struct vattr *a_vap; struct vnode *a_dvp;
@@ -39,14 +39,14 @@ static int vmmfs_node_vop_branch(struct vnode *v, struct vmmfs_node **n) {
     (void)v; *n = &parent; return 0;
 }
 static void vrele(struct vnode *v) { assert(v->refs); --v->refs; }
-static int create(struct vmmfs_node *n, struct mount *m,
+static int create(struct vmmfs_node *n,
     const char *name, size_t len, struct vnode **v) {
-    (void)n; (void)m; (void)name; (void)len;
+    (void)n;  (void)name; (void)len;
     child_node.vnode = &child; child.v_data = &child_node;
-    child.refs = 2; /* registry + create_item caller */
+    child.refs = 2; /* registry + create_object caller */
     *v = &child; return 0;
 }
-static int remove_item(struct vmmfs_node *n, const char *name, size_t len) {
+static int remove_object(struct vmmfs_node *n, const char *name, size_t len) {
     (void)n; (void)name; (void)len;
     ++removed; vrele(&child); return 0;
 }
@@ -81,7 +81,7 @@ int main(void) {
     struct namecache name = { "child", 5 };
     struct nchandle handle = { &name };
     struct vop_nmkdir_args args = { &attr, &directory, &handle, &result };
-    parent.create_item = create; parent.remove_item = remove_item;
+    parent.create_object = create; parent.remove_object = remove_object;
     for (mode = 0; mode < 3; ++mode) {
         removed = 0;
         int error = vmmfs_node_nmkdir(&args);

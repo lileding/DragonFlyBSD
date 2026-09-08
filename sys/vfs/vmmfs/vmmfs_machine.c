@@ -37,11 +37,12 @@
 
 #define VMMFS_MACHINE_MODE 0555
 
-static int vmmfs_machine_ncreate(struct vop_ncreate_args *);
-static int vmmfs_machine_nremove(struct vop_nremove_args *);
+static int vmmfs_machine_create_item(struct vmmfs_node *, const char *,
+	size_t, struct vnode **);
+static int vmmfs_machine_remove_item(struct vmmfs_node *, const char *,
+	size_t, struct ucred *);
 static int vmmfs_machine_get_item(struct vmmfs_node *, const char *,
 	size_t, struct vnode **);
-static int vmmfs_machine_nrmdir(struct vop_nrmdir_args *);
 static int vmmfs_machine_read_item(struct vmmfs_node *, uint64_t,
 	struct vmmfs_node_item *);
 static void vmmfs_machine_drop(struct vmmfs_node *);
@@ -53,11 +54,11 @@ struct vop_ops vmmfs_machine_vops = {
 	.vop_close = vop_stdclose,
 	.vop_getattr = vmmfs_node_getattr,
 	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_ncreate = vmmfs_machine_ncreate,
+	.vop_ncreate = vmmfs_node_ncreate,
 	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
-	.vop_nremove = vmmfs_machine_nremove,
+	.vop_nremove = vmmfs_node_nremove,
 	.vop_nresolve = vmmfs_node_nresolve,
-	.vop_nrmdir = vmmfs_machine_nrmdir,
+	.vop_nrmdir = vmmfs_node_nrmdir,
 	.vop_open = vmmfs_node_open,
 	.vop_pathconf = vop_stdpathconf,
 	.vop_readdir = vmmfs_node_readdir,
@@ -87,6 +88,8 @@ vmmfs_machine_create(struct vmmfs_node *parent,
 	machine->node.drop = vmmfs_machine_drop;
 	machine->node.read_item = vmmfs_machine_read_item;
 	machine->node.get_item = vmmfs_machine_get_item;
+	machine->node.create_item = vmmfs_machine_create_item;
+	machine->node.remove_item = vmmfs_machine_remove_item;
 	vmmfs_node_hold(parent);
 	machine->node.inode = vmmfs_root_allocate_inode(root);
 	machine->node.mode = VMMFS_MACHINE_MODE;
@@ -204,45 +207,19 @@ vmmfs_machine_drop(struct vmmfs_node *node)
 }
 
 static int
-vmmfs_machine_touch_stopped(struct vmmfs_machine *machine,
-	struct vnode **vnodep)
+vmmfs_machine_create_item(struct vmmfs_node *node, const char *name,
+    size_t length, struct vnode **vnodep)
 {
+	struct vmmfs_machine *machine = (struct vmmfs_machine *)node;
+
+	if (length != sizeof("stopped") - 1 ||
+	    bcmp(name, "stopped", sizeof("stopped") - 1) != 0)
+		return (EOPNOTSUPP);
 	vmmfs_vcpu_request_stop(&machine->vcpu);
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_STOP_REQUESTED,
 	    "reason=external");
 	vref(machine->stopped.node.vnode);
 	*vnodep = machine->stopped.node.vnode;
-	return (0);
-}
-
-static int
-vmmfs_machine_ncreate(struct vop_ncreate_args *ap)
-{
-	struct vmmfs_machine *machine;
-	struct vnode *vnode;
-	struct namecache *ncp;
-	int error;
-
-	machine = ap->a_dvp->v_data;
-	if (machine == NULL)
-		return (ENOENT);
-	ncp = ap->a_nch->ncp;
-	if (ncp->nc_nlen != sizeof("stopped") - 1 ||
-		bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) != 0)
-		return (EOPNOTSUPP);
-	if (ap->a_vap->va_type != VREG)
-		return (EINVAL);
-	error = VMMFS_WORK(machine,
-					vmmfs_machine_touch_stopped(machine, &vnode));
-	if (error != 0)
-		return (error);
-	error = vn_lock(vnode, LK_EXCLUSIVE);
-	if (error != 0) {
-		vrele(vnode);
-		return (error);
-	}
-	cache_setunresolved(ap->a_nch);
-	*ap->a_vpp = vnode;
 	return (0);
 }
 
@@ -296,22 +273,19 @@ vmmfs_machine_get_item(struct vmmfs_node *node,
 }
 
 static int
-vmmfs_machine_nremove(struct vop_nremove_args *ap)
+vmmfs_machine_remove_item(struct vmmfs_node *node, const char *name,
+    size_t length, struct ucred *cred)
 {
-	struct vmmfs_machine *machine = ap->a_dvp->v_data;
-	struct namecache *ncp = ap->a_nch->ncp;
+	struct vmmfs_machine *machine = (struct vmmfs_machine *)node;
 	struct vmmfs_launch *launch;
 	int error;
 
-	if (ncp->nc_nlen != sizeof("stopped") - 1 ||
-		bcmp(ncp->nc_name, "stopped", sizeof("stopped") - 1) != 0)
+	if (length != sizeof("stopped") - 1 ||
+		bcmp(name, "stopped", sizeof("stopped") - 1) != 0)
 		return (EOPNOTSUPP);
-	/* post_launch unlinks the old stopped before waking this waiter. */
-	cache_unlock(ap->a_nch);
-	error = VMMFS_WORK(machine, vmmfs_machine_boot(machine,
-												vmmfs_machine_post_launch, &launch));
+	error = vmmfs_machine_boot(machine, vmmfs_machine_post_launch, &launch);
 	if (error == 0) {
-		error = vmmfs_loader_run(&machine->loader, launch, ap->a_cred);
+		error = vmmfs_loader_run(&machine->loader, launch, cred);
 		if (error != 0)
 			vmmfs_launch_cancel(launch);
 		{
@@ -321,19 +295,7 @@ vmmfs_machine_nremove(struct vop_nremove_args *ap)
 		}
 		vmmfs_launch_put(launch);
 	}
-	cache_lock(ap->a_nch);
 	return (error);
-}
-
-static int
-vmmfs_machine_nrmdir(struct vop_nrmdir_args *ap)
-{
-	struct vmmfs_machine *machine;
-
-	machine = ap->a_dvp->v_data;
-	if (machine == NULL)
-		return (ENOENT);
-	return (EOPNOTSUPP);
 }
 
 static int

@@ -257,7 +257,7 @@ def signatures(doc, counts, calls):
     # served only the now-deleted constructor argument.
     for node in doc.tree.get("children", []):
         if node.get("kind") != "Function" or node.get("detail") not in (
-                "vmmfs_root_create_item", "vmmfs_pciroot_create_item"):
+                "vmmfs_root_create_object", "vmmfs_pciroot_create_object"):
             continue
         for statement in walk(node):
             if statement.get("kind") != "Decl":

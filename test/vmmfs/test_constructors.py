@@ -18,6 +18,7 @@ HARNESS = COMMON + r"""
 #define bcopy(s,d,n) memcpy((d),(s),(n))
 struct vmmfs_node_item;
 struct token { bool initialized; unsigned held; };
+struct ucred;
 struct vmmfs_node {
     struct vmmfs_mount *mount;
     struct vnode *vnode;
@@ -26,6 +27,8 @@ struct vmmfs_node {
     bool (*deactivate)(struct vmmfs_node *);
     void (*drop)(struct vmmfs_node *);
     int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);
+    int (*remove_item)(struct vmmfs_node *, const char *, size_t, struct ucred *);
+    int (*create_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);
     int (*read_item)(struct vmmfs_node *, uint64_t, struct vmmfs_node_item *);
  struct lock lock;};
 struct vnode { void *v_data; };
@@ -141,6 +144,8 @@ static void component_fini(struct component *c) {
 #define vmmfs_rtc_init component_init
 #define vmmfs_platform_x64_fini component_fini
 #define vmmfs_rtc_fini component_fini
+#define vmmfs_machine_remove_item NULL
+#define vmmfs_machine_create_item vmmfs_machine_get_item
 static int vmmfs_machine_get_item(struct vmmfs_node *n, const char *s, size_t l, struct vnode **v) { (void)n; (void)s; (void)l; (void)v; return 0; }
 static int vmmfs_machine_read_item(struct vmmfs_node *n, uint64_t i, struct vmmfs_node_item *v) { (void)n; (void)i; (void)v; return 0; }
 static bool vmmfs_machine_deactivate(struct vmmfs_node *n) { (void)n; assert(0); return true; }

@@ -18,9 +18,9 @@ struct vnode;
 struct mount { int unused; };
 struct vmmfs_node { struct vnode *vnode;
     int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);
-    int (*create_item)(struct vmmfs_node *, struct mount *, const char *,
+    int (*create_object)(struct vmmfs_node *, const char *,
         size_t, struct vnode **);
-    int (*remove_item)(struct vmmfs_node *, const char *, size_t);
+    int (*remove_object)(struct vmmfs_node *, const char *, size_t);
  struct lock lock; bool dead;};
 struct vnode {
     int v_type; void *v_data; struct mount *v_mount;
@@ -34,6 +34,7 @@ struct vop_nmkdir_args {
     struct vnode *a_dvp; struct nchandle *a_nch; struct vattr *a_vap;
     struct vnode **a_vpp;
 };
+#define vop_ncreate_args vop_nmkdir_args
 struct vop_nrmdir_args {
     struct vnode *a_dvp; struct nchandle *a_nch; void *a_cred;
 };
@@ -100,17 +101,17 @@ static int get_item(struct vmmfs_node *node, const char *name, size_t length,
     if (lookup_error) return lookup_error;
     assert(registry == &child); vref(registry); *out = registry; return 0;
 }
-static int create_item(struct vmmfs_node *node, struct mount *mount,
+static int create_object(struct vmmfs_node *node,
     const char *name, size_t length, struct vnode **out) {
-    (void)node; (void)mount; assert(length == 5 && !memcmp(name, "child", 5));
+    (void)node;  assert(length == 5 && !memcmp(name, "child", 5));
     *out = NULL;
     if (create_error) return create_error;
     assert(registry == NULL && child.refs == 0);
     child_node.vnode = &child; child.v_data = &child_node;
-    child.refs = 2; /* Registry and the independent create_item result. */
+    child.refs = 2; /* Registry and the independent create_object result. */
     registry = &child; *out = &child; return 0;
 }
-static int remove_item(struct vmmfs_node *node, const char *name,
+static int remove_object(struct vmmfs_node *node, const char *name,
     size_t length) {
     (void)node; assert(length == 5 && !memcmp(name, "child", 5));
     assert(dead && registry == &child && child.refs >= 1);
@@ -118,7 +119,7 @@ static int remove_item(struct vmmfs_node *node, const char *name,
 }
 """ + bodies + r"""
 int main(void) {
-    struct vmmfs_node node = { .get_item=get_item, .create_item=create_item, .remove_item=remove_item };
+    struct vmmfs_node node = { .get_item=get_item, .create_object=create_object, .remove_object=remove_object };
     struct mount mount = { 0 };
     struct vnode parent = { .v_type=VDIR, .v_data=&node, .v_mount=&mount };
     struct namecache name = { .nc_name="child", .nc_nlen=5 };
@@ -234,3 +235,86 @@ int main(void) {
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class PersistentCreate(unittest.TestCase):
+    def test_ncreate_balances_reference_without_deactivating(self):
+        run_c(COMMON + r"""
+enum { VREG = 1, VDIR };
+struct vnode { void *v_data; int refs; };
+struct namecache { const char *nc_name; size_t nc_nlen; };
+struct nchandle { struct namecache *ncp; };
+struct vattr { int va_type; };
+struct vmmfs_node {
+    struct lock lock; bool dead;
+    int (*create_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);
+};
+struct vop_ncreate_args {
+    struct vnode *a_dvp; struct nchandle *a_nch;
+    struct vattr *a_vap; struct vnode **a_vpp;
+};
+static struct vnode child;
+static int fail, calls, invalidations;
+static int create(struct vmmfs_node *n, const char *s, size_t l, struct vnode **v) {
+    (void)n; assert(l==7 && !memcmp(s,"stopped",7)); ++calls;
+    ++child.refs; *v=&child; return 0;
+}
+static int vn_lock(struct vnode *v, int mode) { assert(v==&child && mode==LK_EXCLUSIVE); return fail; }
+static void vrele(struct vnode *v) { assert(v->refs>1); --v->refs; }
+static void cache_setunresolved(struct nchandle *n) { (void)n; ++invalidations; }
+static int
+""" + function("vmmfs_node_vops.c", "vmmfs_node_ncreate") + r"""
+int main(void) {
+    struct vmmfs_node node={.create_item=create};
+    struct vnode parent={.v_data=&node}, *out=NULL;
+    struct namecache nc={"stopped",7}; struct nchandle nch={&nc};
+    struct vattr va={VREG};
+    struct vop_ncreate_args ap={&parent,&nch,&va,&out};
+    child.refs=1;
+    fail=EIO; assert(vmmfs_node_ncreate(&ap)==EIO);
+    assert(child.refs==1 && !out && calls==1 && !invalidations);
+    fail=0; assert(!vmmfs_node_ncreate(&ap));
+    assert(out==&child && child.refs==2 && invalidations==1); vrele(out);
+    va.va_type=VDIR; assert(vmmfs_node_ncreate(&ap)==EINVAL);
+    assert(calls==2);
+    va.va_type=VREG; node.create_item=NULL;
+    assert(vmmfs_node_ncreate(&ap)==EOPNOTSUPP);
+    return 0;
+}
+""")
+
+class ItemRemoval(unittest.TestCase):
+    def test_dispatch_unlocks_name_and_preserves_callback_result(self):
+        run_c(COMMON + r"""
+struct ucred { int id; };
+struct vmmfs_node {
+    struct lock lock; bool dead;
+    int (*remove_item)(struct vmmfs_node *, const char *, size_t, struct ucred *);
+};
+struct vnode { void *v_data; };
+struct namecache { const char *nc_name; size_t nc_nlen; };
+struct nchandle { struct namecache *ncp; };
+struct vop_nremove_args { struct vnode *a_dvp; struct nchandle *a_nch; struct ucred *a_cred; };
+static int locked=1, calls, result;
+static void cache_unlock(struct nchandle *h) { (void)h; assert(locked); locked=0; }
+static void cache_lock(struct nchandle *h) { (void)h; assert(!locked); locked=1; }
+static int remove_item(struct vmmfs_node *n, const char *s, size_t l, struct ucred *c) {
+    assert(n->lock.held && !locked && c->id==42);
+    assert(l==7 && !memcmp(s,"stopped",7)); ++calls; return result;
+}
+static int
+""" + function("vmmfs_node_vops.c", "vmmfs_node_nremove") + r"""
+int main(void) {
+    struct vmmfs_node n={.remove_item=remove_item};
+    struct vnode v={&n}; struct namecache nc={"stopped",7};
+    struct nchandle h={&nc}; struct ucred c={42};
+    struct vop_nremove_args ap={&v,&h,&c};
+    int errors[]={0,EIO,EINTR,EBUSY};
+    for (unsigned i=0;i<4;++i) {
+        result=errors[i]; assert(vmmfs_node_nremove(&ap)==result);
+        assert(locked && !n.lock.held);
+    }
+    n.remove_item=NULL; assert(vmmfs_node_nremove(&ap)==EOPNOTSUPP);
+    assert(locked && calls==4 && !n.lock.held);
+    return 0;
+}
+""")

@@ -103,7 +103,7 @@ static struct vmmfs_pciroot_slot *vmmfs_pciroot_entry_find_locked(struct vmmfs_p
 }
 static bool
 """ + function("vmmfs_pcislot.c", "vmmfs_pcislot_deactivate") + "\nstatic void\n" +
-              function("vmmfs_pciroot.c", "vmmfs_pciroot_release_entry") + "\nstatic int\n" + function("vmmfs_pciroot.c", "vmmfs_pciroot_remove_item") + r"""
+              function("vmmfs_pciroot.c", "vmmfs_pciroot_release_entry") + "\nstatic int\n" + function("vmmfs_pciroot.c", "vmmfs_pciroot_remove_object") + r"""
 int main(void) {
     slot.node.parent = &root.node; slot.node.vnode = &vnode; slot.bdf = 8;
     slot.token.held = 1; slot.node.dead = true;
@@ -127,12 +127,12 @@ int main(void) {
     assert(vmmfs_pcislot_deactivate(&slot.node) == true);
     registry.slots = malloc(sizeof(*registry.slots));
     registry.slots->vnode = &vnode; registry.slots->slot = &slot;
-    vmmfs_pciroot_remove_item(&root.node, "0000:00:01.0", 12);
+    vmmfs_pciroot_remove_object(&root.node, "0000:00:01.0", 12);
     registered = false; slot.entry = NULL; machine.machine = &machine;
     assert(vmmfs_pcislot_deactivate(&slot.node) == true);
     registry.slots = malloc(sizeof(*registry.slots));
     registry.slots->vnode = &vnode; registry.slots->slot = &slot;
-    vmmfs_pciroot_remove_item(&root.node, "0000:00:01.0", 12);
+    vmmfs_pciroot_remove_object(&root.node, "0000:00:01.0", 12);
     return 0;
 }
 """)

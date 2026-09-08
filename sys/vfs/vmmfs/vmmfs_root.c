@@ -52,9 +52,9 @@ static struct vmmfs_root_machine *vmmfs_root_find_locked(
 	struct vmmfs_root *, const char *, size_t);
 static int vmmfs_root_get_item(struct vmmfs_node *, const char *, size_t,
 	struct vnode **);
-static int vmmfs_root_create_item(struct vmmfs_node *, struct mount *,
+static int vmmfs_root_create_object(struct vmmfs_node *,
 	const char *, size_t, struct vnode **);
-static int vmmfs_root_remove_item(struct vmmfs_node *, const char *,
+static int vmmfs_root_remove_object(struct vmmfs_node *, const char *,
 	size_t);
 static bool vmmfs_root_deactivate(struct vmmfs_node *);
 static void vmmfs_root_drop(struct vmmfs_node *);
@@ -113,8 +113,8 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_node **objectp)
 	root->node.drop = vmmfs_root_drop;
 	root->node.get_item = vmmfs_root_get_item;
 	root->node.read_item = vmmfs_root_read_item;
-	root->node.create_item = vmmfs_root_create_item;
-	root->node.remove_item = vmmfs_root_remove_item;
+	root->node.create_object = vmmfs_root_create_object;
+	root->node.remove_object = vmmfs_root_remove_object;
 	root->next_inode = 1;
 	root->node.inode = vmmfs_root_allocate_inode(root);
 	state->root_inode = root->node.inode;
@@ -246,7 +246,7 @@ vmmfs_root_read_item(struct vmmfs_node *node, uint64_t index,
 }
 
 static int
-vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
+vmmfs_root_create_object(struct vmmfs_node *node,
 	const char *name, size_t namelen, struct vnode **vnodep)
 {
 	struct vmmfs_root *root = (struct vmmfs_root *)node;
@@ -271,7 +271,7 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 	else {
 		entry->machine = machine;
 		RB_INSERT(vmmfs_machine_tree, &root->machines, entry);
-		vref(vnode); /* create_item caller, independent of registry. */
+		vref(vnode); /* create_object caller, independent of registry. */
 	}
 	lwkt_reltoken(&root->token);
 	if (error != 0) {
@@ -284,7 +284,7 @@ vmmfs_root_create_item(struct vmmfs_node *node, struct mount *mount,
 }
 
 static int
-vmmfs_root_remove_item(struct vmmfs_node *node, const char *name,
+vmmfs_root_remove_object(struct vmmfs_node *node, const char *name,
 	size_t namelen)
 {
 	struct vmmfs_root *root;

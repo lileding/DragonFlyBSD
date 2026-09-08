@@ -15,6 +15,7 @@
 struct mount;
 struct vmmfs_mount;
 struct cdev;
+struct ucred;
 struct vop_ops;
 struct vmmfs_node;
 struct vmmfs_node_item;
@@ -29,10 +30,16 @@ typedef int (*vmmfs_node_get_item_t)(struct vmmfs_node *, const char *,
 typedef int (*vmmfs_node_read_item_t)(struct vmmfs_node *, uint64_t,
 	struct vmmfs_node_item *);
 /* Success returns a vnode reference in addition to the registry reference. */
-typedef int (*vmmfs_node_create_item_t)(struct vmmfs_node *, struct mount *,
+typedef int (*vmmfs_node_create_object_t)(struct vmmfs_node *,
 	const char *, size_t, struct vnode **);
-typedef int (*vmmfs_node_remove_item_t)(struct vmmfs_node *, const char *,
+typedef int (*vmmfs_node_remove_object_t)(struct vmmfs_node *, const char *,
 	size_t);
+
+/* Item operations need not construct or deactivate the persistent node. */
+typedef int (*vmmfs_node_create_item_t)(struct vmmfs_node *, const char *,
+    size_t, struct vnode **);
+typedef int (*vmmfs_node_remove_item_t)(struct vmmfs_node *, const char *,
+    size_t, struct ucred *);
 
 struct vmmfs_node_item {
 	ino_t inode;
@@ -67,6 +74,8 @@ struct vmmfs_node {
 	vmmfs_node_store_t store;
 	vmmfs_node_get_item_t get_item;
 	vmmfs_node_read_item_t read_item;
+	vmmfs_node_create_object_t create_object;
+	vmmfs_node_remove_object_t remove_object;
 	vmmfs_node_create_item_t create_item;
 	vmmfs_node_remove_item_t remove_item;
 };
@@ -100,6 +109,8 @@ struct vmmfs_node {
 /* Object references do not imply that its vnode or service remains active. */
 void vmmfs_node_hold(struct vmmfs_node *);
 void vmmfs_node_put(struct vmmfs_node *);
+int vmmfs_node_nremove(struct vop_nremove_args *);
+int vmmfs_node_ncreate(struct vop_ncreate_args *);
 int vmmfs_node_nmkdir(struct vop_nmkdir_args *);
 int vmmfs_node_nresolve(struct vop_nresolve_args *);
 int vmmfs_node_nlookupdotdot(struct vop_nlookupdotdot_args *);

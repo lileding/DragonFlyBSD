@@ -261,7 +261,7 @@ int main(void) {
         self.assertNotIn("kfree", function("vmmfs_stopped.c", "vmmfs_stopped_drop"))
         self.assertIn("vmmfs_stopped_init", function("vmmfs_machine.c", "vmmfs_machine_create"))
         self.assertIn("&machine->stopped.node", function("vmmfs_machine.c", "vmmfs_machine_deactivate"))
-        for name in ("vmmfs_machine_get_item", "vmmfs_machine_touch_stopped"):
+        for name in ("vmmfs_machine_get_item", "vmmfs_machine_create_item"):
             body = function("vmmfs_machine.c", name)
             self.assertNotIn("vmmfs_stopped_init", body)
             self.assertNotIn("vmmfs_stopped_create", body)
@@ -282,12 +282,15 @@ int main(void) {
 
 
     def test_nremove_runs_loader_as_launch_continuation(self):
-        body = function("vmmfs_machine.c", "vmmfs_machine_nremove")
-        self.assertIn("VMMFS_WORK(machine, vmmfs_machine_boot", body)
-        self.assertNotIn("VMMFS_WORK(machine, vmmfs_loader_run", body)
-        self.assertLess(body.index("cache_unlock"), body.index("vmmfs_launch_wait"))
-        self.assertLess(body.index("vmmfs_launch_wait"), body.index("cache_lock"))
-        self.assertNotIn("cache_unlink", body)
+        body = function("vmmfs_machine.c", "vmmfs_machine_remove_item")
+        self.assertIn("vmmfs_machine_boot(machine", body)
+        self.assertIn("vmmfs_launch_wait", body)
+        self.assertNotIn("VMMFS_WORK", body)
+        self.assertNotIn("cache_", body)
+        adapter = function("vmmfs_node_vops.c", "vmmfs_node_nremove")
+        self.assertLess(adapter.index("cache_unlock"), adapter.index("VMMFS_CALL"))
+        self.assertLess(adapter.index("VMMFS_CALL"), adapter.index("cache_lock"))
+        self.assertNotIn("cache_unlink", adapter)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
