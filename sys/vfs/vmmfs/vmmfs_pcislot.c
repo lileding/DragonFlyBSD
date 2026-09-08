@@ -27,18 +27,12 @@
 
 #define VMMFS_PCISLOT_MODE 0555
 
-struct vmmfs_pcislot_item {
-	ino_t inode;
-	uint8_t type;
-	char name[32];
-};
-
-static int vmmfs_pcislot_nremove(struct vop_nremove_args *);
-static int vmmfs_pcislot_nresolve(struct vop_nresolve_args *);
-static int vmmfs_pcislot_open(struct vop_open_args *);
-static int vmmfs_pcislot_readdir(struct vop_readdir_args *);
-static int vmmfs_pcislot_read_item(struct vmmfs_pcislot *, uint64_t,
-	struct vmmfs_pcislot_item *);
+static int vmmfs_pcislot_remove_item(struct vmmfs_node *, const char *,
+	size_t, struct ucred *);
+static int vmmfs_pcislot_get_item(struct vmmfs_node *, const char *,
+	size_t, struct vnode **);
+static int vmmfs_pcislot_read_item(struct vmmfs_node *, uint64_t,
+	struct vmmfs_node_item *);
 static int vmmfs_pcislot_type0_build(struct vmmfs_pcislot *);
 static int vmmfs_pcislot_type0_allocate_bar(struct vmmfs_pcislot *,
 	unsigned int);
@@ -58,22 +52,6 @@ static void vmmfs_pcislot_type0_refresh_bar(struct vmmfs_pcislot *,
 	unsigned int);
 static void vmmfs_pcislot_drop(struct vmmfs_node *);
 static bool vmmfs_pcislot_deactivate(struct vmmfs_node *);
-
-struct vop_ops vmmfs_pcislot_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
-	.vop_nremove = vmmfs_pcislot_nremove,
-	.vop_nresolve = vmmfs_pcislot_nresolve,
-	.vop_open = vmmfs_pcislot_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_readdir = vmmfs_pcislot_readdir,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-};
 
 int
 vmmfs_pcislot_create(struct vmmfs_node *parent,
@@ -97,6 +75,9 @@ vmmfs_pcislot_create(struct vmmfs_node *parent,
 	lwkt_token_init(&slot->token, "vmmfsnode");
 	lockinit(&slot->node.lock, "vmmfsnode", 0, 0);
 	slot->node.drop = vmmfs_pcislot_drop;
+	slot->node.read_item = vmmfs_pcislot_read_item;
+	slot->node.remove_item = vmmfs_pcislot_remove_item;
+	slot->node.get_item = vmmfs_pcislot_get_item;
 	vmmfs_node_hold(parent);
 	slot->node.mode = VMMFS_PCISLOT_MODE;
 	slot->node.size = 0;
@@ -110,7 +91,7 @@ vmmfs_pcislot_create(struct vmmfs_node *parent,
 	if (error != 0)
 		goto fail;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->pcislot_vops, VDIR, &slot->node);
+	    &parent->mount->node_vops, VDIR, &slot->node);
 	if (error != 0)
 		goto fail;
 	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_SLOT_CREATED,
@@ -179,7 +160,6 @@ vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 	(void)vmmfs_node_deactivate(&slot->events.node);
 	return (true);
 }
-
 
 int
 vmmfs_pcislot_power_on(struct vmmfs_pcislot *slot, vmm_machine_t machine)
@@ -454,21 +434,23 @@ vmmfs_pcislot_type0_config_write(struct vmmfs_pcislot *slot, vmm_vcpu_t vcpu,
 }
 
 static int
-vmmfs_pcislot_nremove(struct vop_nremove_args *ap)
+vmmfs_pcislot_remove_item(struct vmmfs_node *node, const char *name,
+    size_t length, struct ucred *cred)
 {
-	struct namecache *ncp;
+	(void)node;
+	(void)cred;
 
-	ncp = ap->a_nch->ncp;
-	if (ncp->nc_nlen == sizeof("descriptor") - 1 &&
-	    bcmp(ncp->nc_name, "descriptor", sizeof("descriptor") - 1) == 0)
+	if (length == sizeof("descriptor") - 1 &&
+	    bcmp(name, "descriptor", sizeof("descriptor") - 1) == 0)
 		return (EOPNOTSUPP);
 	return (ENOENT);
 }
 
 static int
-vmmfs_pcislot_get_item(struct vmmfs_pcislot *slot,
+vmmfs_pcislot_get_item(struct vmmfs_node *node,
 	const char *name, size_t length, struct vnode **vnodep)
 {
+	struct vmmfs_pcislot *slot = (struct vmmfs_pcislot *)node;
 	struct vnode *vnode;
 	struct vmmfs_pcislot_resources *resources;
 	int error;
@@ -514,92 +496,10 @@ resolved:
 }
 
 static int
-vmmfs_pcislot_nresolve(struct vop_nresolve_args *ap)
+vmmfs_pcislot_read_item(struct vmmfs_node *node, uint64_t index,
+	struct vmmfs_node_item *item)
 {
-	struct vmmfs_pcislot *slot = ap->a_dvp->v_data;
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vnode *vnode;
-	int error;
-
-	error = VMMFS_WORK(slot, vmmfs_pcislot_get_item(slot,
-	    ncp->nc_name, ncp->nc_nlen, &vnode));
-	if (error != 0) {
-		cache_setvp(ap->a_nch, NULL);
-		return (error);
-	}
-	cache_setvp(ap->a_nch, vnode);
-	vrele(vnode);
-	return (0);
-}
-
-static int
-vmmfs_pcislot_open(struct vop_open_args *ap)
-{
-	return (vop_stdopen(ap));
-}
-
-static int
-vmmfs_pcislot_readdir(struct vop_readdir_args *ap)
-{
-	struct vmmfs_pcislot *slot;
-	struct vmmfs_pcislot_item item;
-	struct uio *uio;
-	off_t offset;
-	uint64_t index;
-	int error;
-	int stop;
-
-	slot = ap->a_vp->v_data;
-	if (slot == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset < 0)
-		return (EINVAL);
-	if (ap->a_ncookies != NULL) {
-		*ap->a_ncookies = 0;
-		*ap->a_cookies = NULL;
-	}
-	offset = uio->uio_offset;
-	error = 0;
-	stop = 0;
-	if (offset == 0) {
-		stop = vop_write_dirent(&error, uio, slot->node.inode, DT_DIR, 1, ".");
-		if (!stop)
-			offset = 1;
-	}
-	if (!stop && offset == 1) {
-		stop = vop_write_dirent(&error, uio, vmmfs_pcislot_pciroot(slot)->node.inode, DT_DIR,
-		    2, "..");
-		if (!stop)
-			offset = 2;
-	}
-	index = offset - 2;
-	while (!stop) {
-		error = VMMFS_WORK(slot, vmmfs_pcislot_read_item(slot, index, &item));
-		if (error == ENOENT) {
-			error = 0;
-			break;
-		}
-		if (error != 0)
-			break;
-		stop = vop_write_dirent(&error, uio, item.inode, item.type,
-		    (uint16_t)strlen(item.name), item.name);
-		if (!stop) {
-			++offset;
-			++index;
-		}
-	}
-	uio->uio_offset = offset;
-	if (ap->a_eofflag != NULL)
-		*ap->a_eofflag = !stop && error == 0;
-	return (error);
-}
-
-
-static int
-vmmfs_pcislot_read_item(struct vmmfs_pcislot *slot, uint64_t index,
-	struct vmmfs_pcislot_item *item)
-{
+	struct vmmfs_pcislot *slot = (struct vmmfs_pcislot *)node;
 	struct vmmfs_pcislot_resources *resources;
 	size_t name_length;
 	int error;

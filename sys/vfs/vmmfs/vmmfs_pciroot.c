@@ -88,24 +88,6 @@ static int vmmfs_pciroot_hostbridge_read(uint16_t, enum vmm_io_width,
 static int vmmfs_pciroot_config_read_locked(struct vmmfs_pciroot *,
 	vmm_vcpu_t, uint16_t, uint16_t, enum vmm_io_width, uint32_t *);
 
-
-struct vop_ops vmmfs_pciroot_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
-	.vop_nmkdir = vmmfs_node_nmkdir,
-	.vop_nresolve = vmmfs_node_nresolve,
-	.vop_nrmdir = vmmfs_node_nrmdir,
-	.vop_open = vmmfs_node_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_readdir = vmmfs_node_readdir,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-};
-
 static int
 vmmfs_pciroot_slot_compare(struct vmmfs_pciroot_slot *left,
 	struct vmmfs_pciroot_slot *right)
@@ -147,7 +129,7 @@ vmmfs_pciroot_init(struct vmmfs_node *parent,
 	pciroot->node.size = 0;
 	RB_INIT(&pciroot->registry->slots);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->pciroot_vops, VDIR, &pciroot->node);
+	    &parent->mount->node_vops, VDIR, &pciroot->node);
 	if (error != 0)
 		vmmfs_node_put(&pciroot->node);
 	else
@@ -206,8 +188,6 @@ vmmfs_pciroot_deactivate(struct vmmfs_node *node)
 			vrele(vnode);
 	}
 }
-
-
 
 void
 vmmfs_pciroot_invalidate_slot(struct vmmfs_pciroot *pciroot,

@@ -13,6 +13,29 @@
 
 #include "vmmfs_node.h"
 
+struct vop_ops vmmfs_node_vops = {
+	.vop_default = vop_defaultop,
+	.vop_access = vmmfs_node_access,
+	.vop_close = vop_stdclose,
+	.vop_getattr = vmmfs_node_getattr,
+	.vop_getattr_lite = vmmfs_node_getattr_lite,
+	.vop_ncreate = vmmfs_node_ncreate,
+	.vop_nmkdir = vmmfs_node_nmkdir,
+	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
+	.vop_nremove = vmmfs_node_nremove,
+	.vop_nresolve = vmmfs_node_nresolve,
+	.vop_nrmdir = vmmfs_node_nrmdir,
+	.vop_open = vmmfs_node_open,
+	.vop_pathconf = vop_stdpathconf,
+	.vop_read = vmmfs_node_read,
+	.vop_readdir = vmmfs_node_readdir,
+	.vop_inactive = vmmfs_node_inactive,
+	.vop_reclaim = vmmfs_node_reclaim,
+	.vop_setattr = vmmfs_node_setattr,
+	.vop_write = vmmfs_node_write,
+};
+
+
 static int
 vmmfs_node_vop_branch(struct vnode *vnode, struct vmmfs_node **branchp)
 {

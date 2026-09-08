@@ -21,7 +21,7 @@ class Work(unittest.TestCase):
             'pcislot_descriptor': ('store',),
             'machine': ('get_item',),
             'pcislot': ('get_item', 'read_item'),
-            'serialroot': ('get_item', 'create_port'),
+            'serialroot': ('get_item', 'create_item', 'remove_item', 'read_item'),
             'vcpu': ('load', 'store'), 'memory': ('load', 'store'),
             'launch': ('pager_fault',),
             'pcislot_resource': ('enabled',),

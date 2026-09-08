@@ -132,6 +132,7 @@ int main(void) {
     def test_all_directory_users_bind_the_common_vop(self):
         for name in ("machine", "pciroot", "serialroot", "pcislot"):
             text = (SOURCE / ("vmmfs_" + name + ".c")).read_text()
-            self.assertTrue(".vop_nlookupdotdot = vmmfs_node_nlookupdotdot," in text, name)
+            self.assertIn("->node_vops", text)
             self.assertNotIn("vmmfs_" + name + "_nlookupdotdot(", text)
-        self.assertNotIn("vop_nlookupdotdot", (SOURCE / "vmmfs_root.c").read_text())
+        self.assertIn(".vop_nlookupdotdot = vmmfs_node_nlookupdotdot,",
+                      (SOURCE / "vmmfs_node_vops.c").read_text())

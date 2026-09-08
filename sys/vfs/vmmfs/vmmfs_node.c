@@ -156,6 +156,8 @@ vmmfs_node_read(struct vop_read_args *ap)
 
 	if (ap == NULL)
 		return (EINVAL);
+	if (ap->a_vp->v_type == VDIR)
+		return (EISDIR);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
 		return (ENOENT);
@@ -218,6 +220,8 @@ vmmfs_node_write(struct vop_write_args *ap)
 
 	if (ap == NULL)
 		return (EINVAL);
+	if (ap->a_vp->v_type == VDIR)
+		return (EISDIR);
 	node = ap->a_vp->v_data;
 	if (node == NULL)
 		return (ENOENT);
@@ -283,6 +287,8 @@ vmmfs_node_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 	struct vnode *vnode;
 	int error;
 
+	if (parent == NULL)
+		return (EOPNOTSUPP);
 	error = VMMFS_WORK(parent, vmmfs_node_get_vnode(parent, &vnode));
 	if (error != 0)
 		return (error);

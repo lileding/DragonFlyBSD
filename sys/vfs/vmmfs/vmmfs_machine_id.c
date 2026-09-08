@@ -35,21 +35,6 @@ vmmfs_machine_id_deactivate(struct vmmfs_node *node)
 	return (true);
 }
 
-struct vop_ops vmmfs_machine_id_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_open = vmmfs_node_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_node_read,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_node_setattr,
-	.vop_write = vmmfs_node_write,
-};
-
 int
 vmmfs_machine_id_init(struct vmmfs_node *parent,
 	struct vmmfs_machine_id *identity)
@@ -83,7 +68,7 @@ vmmfs_machine_id_init(struct vmmfs_node *parent,
 	identity->node.mode = VMMFS_MACHINE_ID_MODE;
 	identity->node.size = vmmfs_node_decimal_size(value);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->machine_id_vops, VREG, &identity->node);
+	    &parent->mount->node_vops, VREG, &identity->node);
 	if (error == 0) {
 		identity->node.deactivate = vmmfs_machine_id_deactivate;
 		return (0);

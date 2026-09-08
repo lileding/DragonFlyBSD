@@ -67,21 +67,6 @@ vmmfs_vcpu_deactivate(struct vmmfs_node *node)
 	return (true);
 }
 
-struct vop_ops vmmfs_vcpu_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_open = vmmfs_node_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_node_read,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_node_setattr,
-	.vop_write = vmmfs_node_write,
-};
-
 static int
 vmmfs_vcpu_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 	size_t *length)
@@ -169,7 +154,7 @@ vmmfs_vcpu_init(struct vmmfs_node *parent,
 	vcpu->node.mode = VMMFS_VCPU_MODE;
 	vcpu->node.size = vmmfs_node_decimal_size(vcpu->count);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->vcpu_vops, VREG, &vcpu->node);
+	    &parent->mount->node_vops, VREG, &vcpu->node);
 	if (error == 0) {
 		vcpu->node.deactivate = vmmfs_vcpu_deactivate;
 		return (0);
@@ -193,7 +178,6 @@ vmmfs_vcpu_drop(struct vmmfs_node *node)
 	vcpu->node.inode = 0;
 
 }
-
 
 int
 vmmfs_vcpu_prepare(struct vmmfs_vcpu *vcpu, uint32_t count,
@@ -314,8 +298,6 @@ vmmfs_vcpu_run(struct vmmfs_vcpu *vcpu)
 	lwkt_reltoken(&vcpu->token);
 	wakeup(vcpu);
 }
-
-
 
 void
 vmmfs_vcpu_request_stop(struct vmmfs_vcpu *vcpu)

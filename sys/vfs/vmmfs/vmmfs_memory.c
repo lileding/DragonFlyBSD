@@ -44,21 +44,6 @@ vmmfs_memory_deactivate(struct vmmfs_node *node)
 	return (true);
 }
 
-struct vop_ops vmmfs_memory_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_open = vmmfs_node_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_node_read,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_node_setattr,
-	.vop_write = vmmfs_node_write,
-};
-
 static int
 vmmfs_memory_load(struct vmmfs_node *node, char *buffer, size_t capacity,
 	size_t *length)
@@ -142,7 +127,7 @@ vmmfs_memory_init(struct vmmfs_node *parent,
 	memory->node.mode = VMMFS_MEMORY_MODE;
 	memory->node.size = vmmfs_node_decimal_size(memory->size);
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->memory_vops, VREG, &memory->node);
+	    &parent->mount->node_vops, VREG, &memory->node);
 	if (error == 0) {
 		memory->node.deactivate = vmmfs_memory_deactivate;
 		return (0);
@@ -164,7 +149,6 @@ vmmfs_memory_drop(struct vmmfs_node *node)
 	memory->node.inode = 0;
 
 }
-
 
 int
 vmmfs_memory_prepare(struct vmmfs_memory *memory, uint64_t size)

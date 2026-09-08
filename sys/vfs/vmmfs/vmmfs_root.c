@@ -59,23 +59,6 @@ static int vmmfs_root_remove_object(struct vmmfs_node *, const char *,
 static bool vmmfs_root_deactivate(struct vmmfs_node *);
 static void vmmfs_root_drop(struct vmmfs_node *);
 
-
-struct vop_ops vmmfs_root_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_open = vmmfs_node_open,
-	.vop_nmkdir = vmmfs_node_nmkdir,
-	.vop_nresolve = vmmfs_node_nresolve,
-	.vop_nrmdir = vmmfs_node_nrmdir,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_readdir = vmmfs_node_readdir,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-};
-
 static int
 vmmfs_root_machine_compare(struct vmmfs_root_machine *left,
 	struct vmmfs_root_machine *right)
@@ -121,7 +104,7 @@ vmmfs_root_create(struct mount *mount, struct vmmfs_node **objectp)
 	root->node.mode = VMMFS_ROOT_MODE;
 	root->node.size = 0;
 	RB_INIT(&root->machines);
-	error = vmmfs_vnode_create_regular(mount, &state->root_vops, VDIR,
+	error = vmmfs_vnode_create_regular(mount, &state->node_vops, VDIR,
 		&root->node);
 	vnode = root->node.vnode;
 	if (error != 0) {
@@ -164,7 +147,6 @@ vmmfs_root_deactivate(struct vmmfs_node *node)
 	return (RB_EMPTY(&root->machines));
 }
 
-
 static void
 vmmfs_root_drop(struct vmmfs_node *node)
 {
@@ -177,7 +159,6 @@ vmmfs_root_drop(struct vmmfs_node *node)
 	kfree(root, M_VMMFS);
 	atomic_add_int(&vmmfs_root_count, -1);
 }
-
 
 static struct vmmfs_root_machine *
 vmmfs_root_find_locked(struct vmmfs_root *root, const char *name,

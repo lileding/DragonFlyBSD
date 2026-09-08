@@ -53,21 +53,6 @@ vmmfs_loader_deactivate(struct vmmfs_node *node)
 	return (true);
 }
 
-struct vop_ops vmmfs_loader_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_open = vmmfs_node_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_read = vmmfs_node_read,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-	.vop_setattr = vmmfs_node_setattr,
-	.vop_write = vmmfs_node_write,
-};
-
 int
 vmmfs_loader_run(struct vmmfs_loader *loader, struct vmmfs_launch *launch,
 	struct ucred *cred)
@@ -303,7 +288,7 @@ vmmfs_loader_init(struct vmmfs_node *parent,
 	loader->node.mode = VMMFS_LOADER_MODE;
 	loader->node.size = 1;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->loader_vops, VREG, &loader->node);
+	    &parent->mount->node_vops, VREG, &loader->node);
 	if (error == 0) {
 		loader->node.deactivate = vmmfs_loader_deactivate;
 		return (0);

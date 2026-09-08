@@ -33,7 +33,7 @@ struct vmmfs_node {
  struct lock lock;};
 struct vnode { void *v_data; };
 struct vmmfs_root { int unused; };
-struct vmmfs_mount { void *root; void *mount, *machine_vops, *pcislot_vops; };
+struct vmmfs_mount { void *root; void *mount, *node_vops; };
 struct child { struct vmmfs_node node; void *runtime_machine; };
 struct component { void *machine; };
 struct vmmfs_machine {
@@ -145,6 +145,9 @@ static void component_fini(struct component *c) {
 #define vmmfs_platform_x64_fini component_fini
 #define vmmfs_rtc_fini component_fini
 #define vmmfs_machine_remove_item NULL
+#define vmmfs_pcislot_remove_item NULL
+#define vmmfs_pcislot_get_item vmmfs_machine_get_item
+#define vmmfs_pcislot_read_item vmmfs_machine_read_item
 #define vmmfs_machine_create_item vmmfs_machine_get_item
 static int vmmfs_machine_get_item(struct vmmfs_node *n, const char *s, size_t l, struct vnode **v) { (void)n; (void)s; (void)l; (void)v; return 0; }
 static int vmmfs_machine_read_item(struct vmmfs_node *n, uint64_t i, struct vmmfs_node_item *v) { (void)n; (void)i; (void)v; return 0; }
@@ -170,7 +173,7 @@ class Constructors(unittest.TestCase):
 int main(void) {
     struct vmmfs_root root;
     struct vnode root_vnode = { &root };
-    struct vmmfs_mount mount = { &root_vnode, &root, &root, &root };
+    struct vmmfs_mount mount = { &root_vnode, &root, &root };
     struct vmmfs_node parent = { .references = 1, .mount = &mount };
     struct vmmfs_machine *machine;
     struct vmmfs_pcislot *slot;

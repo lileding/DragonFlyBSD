@@ -31,19 +31,10 @@
 #include "vmmfs_serialport.h"
 #include "vmmfs_serialroot.h"
 
-extern struct vop_ops vmmfs_root_vops;
-extern struct vop_ops vmmfs_machine_vops;
-extern struct vop_ops vmmfs_machine_id_vops;
-extern struct vop_ops vmmfs_vcpu_vops;
-extern struct vop_ops vmmfs_memory_vops;
-extern struct vop_ops vmmfs_loader_vops;
 extern struct vop_ops vmmfs_boot_vops;
 extern struct vop_ops vmmfs_stopped_vops;
 extern struct vop_ops vmmfs_events_vops;
-extern struct vop_ops vmmfs_serialroot_vops;
 extern struct vop_ops vmmfs_serialport_vops;
-extern struct vop_ops vmmfs_pciroot_vops;
-extern struct vop_ops vmmfs_pcislot_vops;
 extern struct vop_ops vmmfs_pcislot_descriptor_vops;
 extern struct vop_ops vmmfs_pcislot_config_vops;
 extern struct vop_ops vmmfs_pcislot_resource_vops;
@@ -175,30 +166,17 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 		mount->mnt_data = NULL;
 		goto fail;
 	}
+	vfs_add_vnodeops(mount, &vmmfs_node_vops, &state->node_vops);
 	vfs_add_vnodeops(mount, &vmmfs_namespace_vops,
 	    &mount->mnt_vn_norm_ops);
-	vfs_add_vnodeops(mount, &vmmfs_root_vops, &state->root_vops);
-	vfs_add_vnodeops(mount, &vmmfs_machine_vops,
-	    &state->machine_vops);
-	vfs_add_vnodeops(mount, &vmmfs_machine_id_vops,
-	    &state->machine_id_vops);
-	vfs_add_vnodeops(mount, &vmmfs_vcpu_vops, &state->vcpu_vops);
-	vfs_add_vnodeops(mount, &vmmfs_memory_vops, &state->memory_vops);
-	vfs_add_vnodeops(mount, &vmmfs_loader_vops, &state->loader_vops);
 	vfs_add_vnodeops(mount, &vmmfs_boot_vops, &state->boot_vops);
 	vfs_add_vnodeops(mount, &vmmfs_launch_vops, &state->launch_vops);
 	vfs_add_vnodeops(mount, &vmmfs_stopped_vops,
 	    &state->stopped_vops);
 	vfs_add_vnodeops(mount, &vmmfs_events_vops,
 	    &state->events_vops);
-	vfs_add_vnodeops(mount, &vmmfs_serialroot_vops,
-	    &state->serialroot_vops);
 	vfs_add_vnodeops(mount, &vmmfs_serialport_vops,
 	    &state->serialport_vops);
-	vfs_add_vnodeops(mount, &vmmfs_pciroot_vops,
-	    &state->pciroot_vops);
-	vfs_add_vnodeops(mount, &vmmfs_pcislot_vops,
-	    &state->pcislot_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_descriptor_vops,
 	    &state->pcislot_descriptor_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_config_vops,
@@ -215,18 +193,10 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->serialport_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->serialroot_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->events_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->machine_id_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->root_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->node_vops);
 		vfs_rm_vnodeops(mount, NULL, &mount->mnt_vn_norm_ops);
 		mount->mnt_data = NULL;
 		goto fail;
@@ -274,20 +244,12 @@ vmmfs_unmount(struct mount *mount, int flags)
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->pcislot_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->pciroot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->serialport_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->serialroot_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->stopped_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->events_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->loader_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->launch_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->memory_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->vcpu_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->machine_id_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->machine_vops);
-	vfs_rm_vnodeops(mount, NULL, &state->root_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->node_vops);
 	vfs_rm_vnodeops(mount, NULL, &mount->mnt_vn_norm_ops);
 	mount->mnt_data = NULL;
 	kfree(state, M_VMMFS);

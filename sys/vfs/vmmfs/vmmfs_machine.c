@@ -48,24 +48,6 @@ static int vmmfs_machine_read_item(struct vmmfs_node *, uint64_t,
 static void vmmfs_machine_drop(struct vmmfs_node *);
 static bool vmmfs_machine_deactivate(struct vmmfs_node *);
 
-struct vop_ops vmmfs_machine_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_ncreate = vmmfs_node_ncreate,
-	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
-	.vop_nremove = vmmfs_node_nremove,
-	.vop_nresolve = vmmfs_node_nresolve,
-	.vop_nrmdir = vmmfs_node_nrmdir,
-	.vop_open = vmmfs_node_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_readdir = vmmfs_node_readdir,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-};
-
 int
 vmmfs_machine_create(struct vmmfs_node *parent,
 					 const char *name, size_t namelen, struct vmmfs_machine **objectp)
@@ -130,7 +112,7 @@ vmmfs_machine_create(struct vmmfs_node *parent,
 	if (error != 0)
 		goto fail;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-									&parent->mount->machine_vops, VDIR, &machine->node);
+									&parent->mount->node_vops, VDIR, &machine->node);
 	if (error != 0)
 		goto fail;
 	vmmfs_events_log(&machine->events, VMMFS_MACHINE_EVENT_CREATED, NULL);

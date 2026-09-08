@@ -335,7 +335,8 @@ struct vmmfs_node { struct vnode *vnode;
     struct token token; bool dead; size_t store_limit;
     int (*store)(struct vmmfs_node *, const char *, size_t);
  struct lock lock;};
-struct vnode { void *v_data; };
+enum { VREG=1, VDIR };
+struct vnode { void *v_data; int v_type; };
 struct uio { off_t uio_offset; size_t uio_resid; };
 struct vop_write_args { struct vnode *a_vp; struct uio *a_uio; };
 #define M_VMMFS 0
@@ -360,7 +361,7 @@ static int store(struct vmmfs_node *n, const char *p, size_t length) {
 int
 """ + function("vmmfs_node.c", "vmmfs_node_write") + r"""
 int main(void) {
-    struct vnode vnode = { &node };
+    struct vnode vnode = { &node, VREG };
     struct uio uio = { 0, 0 };
     struct vop_write_args args = { &vnode, &uio };
     node.store = store; node.store_limit = 4096;
@@ -372,6 +373,8 @@ int main(void) {
     close_on_copy = true;
     assert(vmmfs_node_write(&args) == ENOENT && stored == 3 && freed == 2);
     assert(!node.token.held);
+    vnode.v_type=VDIR;
+    assert(vmmfs_node_write(&args)==EISDIR && stored==3);
 }
 """)
 
@@ -620,8 +623,10 @@ int main(void) {
         run_c(COMMON + r"""
 typedef unsigned long ino_t;
 struct token { unsigned held; };
-struct vmmfs_node { struct vnode *vnode; struct token token; unsigned references; bool dead; ino_t inode;  struct lock lock;};
-struct vnode { void *v_data; unsigned holds; };
+struct vmmfs_node { struct vnode *vnode; struct token token; unsigned references; bool dead; ino_t inode;  struct lock lock;
+int (*get_item)(struct vmmfs_node *,const char *,size_t,struct vnode **);};
+enum { VDIR=1 };
+struct vnode { void *v_data; unsigned holds; int v_type; };
 struct vmmfs_pcislot_resource { struct vmmfs_node node; };
 struct vmmfs_pcislot_resources {
     struct vmmfs_node node; struct token token;
@@ -642,7 +647,7 @@ struct vmmfs_pcislot {
     struct child config, events;
     struct vnode *descriptor_vnode, *events_vnode, *config_vnode;
 };
-struct vmmfs_pcislot_item { ino_t inode; int type; char name[32]; };
+struct vmmfs_node_item { ino_t inode; int type; char name[32]; };
 struct namecache { const char *nc_name; size_t nc_nlen; };
 struct nchandle { struct namecache *ncp; };
 struct vop_nresolve_args { struct vnode *a_dvp; struct nchandle *a_nch; };
@@ -693,48 +698,49 @@ int
 int
 """ + function("vmmfs_pcislot_resource.c", "vmmfs_pcislot_resources_read_item") + r"""
 static int
-""" + (function('vmmfs_pcislot.c', 'vmmfs_pcislot_get_item') + '\nstatic int\n' + function('vmmfs_pcislot.c', 'vmmfs_pcislot_nresolve')) + r"""
+""" + (function('vmmfs_pcislot.c', 'vmmfs_pcislot_get_item') + '\nstatic int\n' + function('vmmfs_node_vops.c', 'vmmfs_node_vop_branch') + '\nstatic int\n' + function('vmmfs_node_vops.c', 'vmmfs_node_nresolve')) + r"""
 static int
 """ + function("vmmfs_pcislot.c", "vmmfs_pcislot_read_item") + r"""
 int main(void) {
     struct vnode *vnodes[] = { &bar };
-    struct vnode parent = { .v_data = &slot };
+    struct vnode parent = { .v_data = &slot, .v_type=VDIR };
     struct namecache name = { "bar0", 4 };
     struct nchandle handle = { &name };
     struct vop_nresolve_args args = { &parent, &handle };
-    struct vmmfs_pcislot_item item;
+    struct vmmfs_node_item item;
     struct vnode *found = NULL;
     resources.node.references = 1;
     resources.items[0].node.vnode = vnodes[0]; resources.count = 1;
     resources.items[0].node.inode = 42;
     slot.resources = &resources;
+    slot.node.get_item=vmmfs_pcislot_get_item;
 
     /* The child must be held before lookup releases its registry token. */
     assert(vmmfs_pcislot_resources_lookup(&resources, "bar0", 4, &found) == 0);
     assert(found == &bar && bar.holds == 1); vrele(found);
-    assert(vmmfs_pcislot_nresolve(&args) == 0 && cached == 1);
+    assert(vmmfs_node_nresolve(&args) == 0 && cached == 1);
     assert(bar.holds == 0 && resources.node.references == 1);
-    assert(vmmfs_pcislot_read_item(&slot, 0, &item) == 0);
+    assert(vmmfs_pcislot_read_item(&slot.node, 0, &item) == 0);
     assert(strcmp(item.name, "descriptor") == 0);
-    assert(vmmfs_pcislot_read_item(&slot, 1, &item) == 0);
+    assert(vmmfs_pcislot_read_item(&slot.node, 1, &item) == 0);
     assert(item.inode == 42 && strcmp(item.name, "bar0") == 0);
 
     /* Detachment between parent and child locks cannot free the collection. */
     retire_on_unlock = true;
-    assert(vmmfs_pcislot_nresolve(&args) == ENOENT && cached == 0);
+    assert(vmmfs_node_nresolve(&args) == ENOENT && cached == 0);
     assert(resources.node.references == 0 && bar.holds == 0);
-    assert(vmmfs_pcislot_nresolve(&args) == ENOENT);
-    assert(vmmfs_pcislot_read_item(&slot, 1, &item) == ENOENT);
+    assert(vmmfs_node_nresolve(&args) == ENOENT);
+    assert(vmmfs_pcislot_read_item(&slot.node, 1, &item) == ENOENT);
 
     resources.node.references = 1; resources.destroying = false;
     resources.items[0].node.vnode = &bar; slot.resources = &resources;
     retire_on_unlock = true;
-    assert(vmmfs_pcislot_read_item(&slot, 1, &item) == ENOENT);
+    assert(vmmfs_pcislot_read_item(&slot.node, 1, &item) == ENOENT);
     assert(resources.node.references == 0);
     slot.descriptor.node.vnode = &bar; name.nc_name = "descriptor"; name.nc_nlen = 10;
-    assert(vmmfs_pcislot_nresolve(&args) == 0 && bar.holds == 0);
+    assert(vmmfs_node_nresolve(&args) == 0 && bar.holds == 0);
     slot.node.dead = true;
-    assert(vmmfs_pcislot_nresolve(&args) == ENOENT);
+    assert(vmmfs_node_nresolve(&args) == ENOENT);
 }
 """)
 
@@ -1172,7 +1178,7 @@ struct token { int unused; };
 struct vmmfs_machine { struct vmmfs_node node; struct token token; unsigned id; };
 struct vmmfs_root { int unused; };
 struct vmmfs_machine_id { struct vmmfs_node node; };
-struct vmmfs_mount { void *root; void *machine_id_vops, *mount; };
+struct vmmfs_mount { void *root; void *node_vops, *mount; };
 static unsigned vmmfs_machine_next_id;
 static int tokens, drops;
 #define VMMFS_MACHINE_ID_MAX 999999

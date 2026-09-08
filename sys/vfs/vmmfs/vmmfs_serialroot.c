@@ -40,19 +40,14 @@ struct vmmfs_serialroot_registry {
 	struct vmmfs_serialport_tree ports;
 };
 
-struct vmmfs_serialroot_item {
-	ino_t inode;
-	char name[sizeof("com4")];
-};
-
-static int vmmfs_serialroot_ncreate(struct vop_ncreate_args *);
-static int vmmfs_serialroot_nremove(struct vop_nremove_args *);
 static int vmmfs_serialroot_get_item(struct vmmfs_node *, const char *,
 	size_t, struct vnode **);
-static int vmmfs_serialroot_nresolve(struct vop_nresolve_args *);
-static int vmmfs_serialroot_readdir(struct vop_readdir_args *);
-static int vmmfs_serialroot_read_item(struct vmmfs_serialroot *, uint64_t,
-	struct vmmfs_serialroot_item *);
+static int vmmfs_serialroot_remove_item(struct vmmfs_node *, const char *,
+	size_t, struct ucred *);
+static int vmmfs_serialroot_create_item(struct vmmfs_node *, const char *,
+	size_t, struct vnode **);
+static int vmmfs_serialroot_read_item(struct vmmfs_node *, uint64_t,
+	struct vmmfs_node_item *);
 static int vmmfs_serialroot_port_compare(struct vmmfs_serialroot_port *,
 	struct vmmfs_serialroot_port *);
 RB_PROTOTYPE(vmmfs_serialport_tree, vmmfs_serialroot_port, entry,
@@ -61,23 +56,6 @@ static struct vmmfs_serialroot_port *vmmfs_serialroot_find_locked(
 	struct vmmfs_serialroot *, const char *);
 static void vmmfs_serialroot_drop(struct vmmfs_node *);
 static bool vmmfs_serialroot_deactivate(struct vmmfs_node *);
-
-struct vop_ops vmmfs_serialroot_vops = {
-	.vop_default = vop_defaultop,
-	.vop_access = vmmfs_node_access,
-	.vop_close = vop_stdclose,
-	.vop_getattr = vmmfs_node_getattr,
-	.vop_getattr_lite = vmmfs_node_getattr_lite,
-	.vop_ncreate = vmmfs_serialroot_ncreate,
-	.vop_nlookupdotdot = vmmfs_node_nlookupdotdot,
-	.vop_nremove = vmmfs_serialroot_nremove,
-	.vop_nresolve = vmmfs_serialroot_nresolve,
-	.vop_open = vmmfs_node_open,
-	.vop_pathconf = vop_stdpathconf,
-	.vop_readdir = vmmfs_serialroot_readdir,
-	.vop_inactive = vmmfs_node_inactive,
-	.vop_reclaim = vmmfs_node_reclaim,
-};
 
 static int
 vmmfs_serialroot_port_compare(struct vmmfs_serialroot_port *left,
@@ -113,12 +91,15 @@ vmmfs_serialroot_init(struct vmmfs_node *parent,
 	lwkt_token_init(&serialroot->token, "vmmfsnode");
 	lockinit(&serialroot->node.lock, "vmmfsnode", 0, 0);
 	serialroot->node.drop = vmmfs_serialroot_drop;
+	serialroot->node.read_item = vmmfs_serialroot_read_item;
+	serialroot->node.remove_item = vmmfs_serialroot_remove_item;
+	serialroot->node.create_item = vmmfs_serialroot_create_item;
 	vmmfs_node_hold(parent);
 	serialroot->node.get_item = vmmfs_serialroot_get_item;
 	serialroot->node.mode = VMMFS_SERIALROOT_MODE;
 	serialroot->node.size = 0;
 	error = vmmfs_vnode_create_regular(parent->mount->mount,
-	    &parent->mount->serialroot_vops, VDIR, &serialroot->node);
+	    &parent->mount->node_vops, VDIR, &serialroot->node);
 	if (error != 0)
 		vmmfs_node_put(&serialroot->node);
 	else
@@ -174,8 +155,6 @@ vmmfs_serialroot_deactivate(struct vmmfs_node *node)
 			vrele(vnode);
 	}
 }
-
-
 
 int
 vmmfs_serialroot_start(struct vmmfs_serialroot *serialroot,
@@ -262,9 +241,10 @@ static int vmmfs_serialroot_remove_port(struct vmmfs_serialroot *,
 	struct vnode *);
 
 static int
-vmmfs_serialroot_create_port(struct vmmfs_serialroot *serialroot,
+vmmfs_serialroot_create_item(struct vmmfs_node *node,
 	const char *input, size_t length, struct vnode **vnodep)
 {
+	struct vmmfs_serialroot *serialroot = (struct vmmfs_serialroot *)node;
 	struct vmmfs_machine *machine = vmmfs_serialroot_machine(serialroot);
 	struct vmmfs_serialroot_port *entry;
 	struct vmmfs_serialport *port;
@@ -333,36 +313,6 @@ failed:
 }
 
 static int
-vmmfs_serialroot_ncreate(struct vop_ncreate_args *ap)
-{
-	struct vmmfs_serialroot *serialroot = ap->a_dvp->v_data;
-	struct namecache *ncp = ap->a_nch->ncp;
-	struct vnode *vnode;
-	int error, cleanup_error;
-
-	if (ap->a_vap->va_type != VREG)
-		return (EINVAL);
-	error = VMMFS_WORK(serialroot, vmmfs_serialroot_create_port(serialroot,
-	    ncp->nc_name, ncp->nc_nlen, &vnode));
-	if (error != 0)
-		return (error);
-	error = vn_lock(vnode, LK_EXCLUSIVE);
-	if (error != 0) {
-		cleanup_error = VMMFS_WORK(serialroot,
-		    vmmfs_serialroot_remove_port(serialroot, vnode));
-		if (cleanup_error != 0 && cleanup_error != EBUSY &&
-		    cleanup_error != ENOENT)
-			kprintf("vmmfs: serial create rollback: %d\n", cleanup_error);
-		vrele(vnode);
-		return (error);
-	}
-	*ap->a_vpp = vnode;
-	cache_setunresolved(ap->a_nch);
-	cache_setvp(ap->a_nch, vnode);
-	return (0);
-}
-
-static int
 vmmfs_serialroot_remove_port(struct vmmfs_serialroot *serialroot,
 	struct vnode *vnode)
 {
@@ -396,32 +346,6 @@ vmmfs_serialroot_remove_port(struct vmmfs_serialroot *serialroot,
 }
 
 static int
-vmmfs_serialroot_nremove(struct vop_nremove_args *ap)
-{
-	struct vmmfs_serialroot *serialroot;
-	struct vnode *vnode;
-	int error;
-
-	serialroot = ap->a_dvp->v_data;
-	if (serialroot == NULL)
-		return (ENOENT);
-	error = cache_vget(ap->a_nch, ap->a_cred, LK_SHARED, &vnode);
-	if (error != 0)
-		return (error);
-	vn_unlock(vnode);
-	if (vnode->v_type != VCHR) {
-		vrele(vnode);
-		return (EISDIR);
-	}
-	error = VMMFS_WORK(serialroot,
-	    vmmfs_serialroot_remove_port(serialroot, vnode));
-	if (error == 0)
-		cache_unlink(ap->a_nch);
-	vrele(vnode);
-	return (error);
-}
-
-static int
 vmmfs_serialroot_get_item(struct vmmfs_node *node, const char *name,
 	size_t length, struct vnode **vnodep)
 {
@@ -444,85 +368,6 @@ vmmfs_serialroot_get_item(struct vmmfs_node *node, const char *name,
 	return (*vnodep == NULL ? ENOENT : 0);
 }
 
-static int
-vmmfs_serialroot_nresolve(struct vop_nresolve_args *ap)
-{
-	struct vmmfs_node *node = ap->a_dvp->v_data;
-	struct vnode *vnode;
-	struct namecache *ncp = ap->a_nch->ncp;
-	int error;
-
-	error = VMMFS_WORK(node, vmmfs_serialroot_get_item(node,
-	    ncp->nc_name, ncp->nc_nlen, &vnode));
-	if (error != 0) {
-		cache_setvp(ap->a_nch, NULL);
-		return (error);
-	}
-	cache_setvp(ap->a_nch, vnode);
-	vrele(vnode);
-	return (0);
-}
-
-static int
-vmmfs_serialroot_readdir(struct vop_readdir_args *ap)
-{
-	struct vmmfs_serialroot *serialroot;
-	struct vmmfs_serialroot_item item;
-	struct uio *uio;
-	off_t offset;
-	uint64_t index;
-	int error;
-	int stop;
-
-	serialroot = ap->a_vp->v_data;
-	if (serialroot == NULL)
-		return (ENOENT);
-	uio = ap->a_uio;
-	if (uio->uio_offset < 0)
-		return (EINVAL);
-	if (ap->a_ncookies != NULL) {
-		*ap->a_ncookies = 0;
-		*ap->a_cookies = NULL;
-	}
-	offset = uio->uio_offset;
-	error = 0;
-	stop = 0;
-	if (offset == 0) {
-		stop = vop_write_dirent(&error, uio, serialroot->node.inode, DT_DIR, 1,
-		    ".");
-		if (!stop)
-			offset = 1;
-	}
-	if (!stop && offset == 1) {
-		stop = vop_write_dirent(&error, uio, vmmfs_serialroot_machine(serialroot)->node.inode,
-		    DT_DIR, 2, "..");
-		if (!stop)
-			offset = 2;
-	}
-	index = offset - 2;
-	while (!stop) {
-		error = VMMFS_WORK(serialroot,
-		    vmmfs_serialroot_read_item(serialroot, index, &item));
-		if (error == ENOENT) {
-			error = 0;
-			break;
-		}
-		if (error != 0)
-			break;
-		stop = vop_write_dirent(&error, uio, item.inode, DT_CHR,
-		    (uint16_t)strlen(item.name), item.name);
-		if (!stop) {
-			offset++;
-			index++;
-		}
-	}
-	uio->uio_offset = offset;
-	if (ap->a_eofflag != NULL)
-		*ap->a_eofflag = !stop && error == 0;
-	return (error);
-}
-
-
 static struct vmmfs_serialroot_port *
 vmmfs_serialroot_find_locked(struct vmmfs_serialroot *serialroot,
 	const char *name)
@@ -537,9 +382,10 @@ vmmfs_serialroot_find_locked(struct vmmfs_serialroot *serialroot,
 }
 
 static int
-vmmfs_serialroot_read_item(struct vmmfs_serialroot *serialroot,
-	uint64_t index, struct vmmfs_serialroot_item *item)
+vmmfs_serialroot_read_item(struct vmmfs_node *node,
+	uint64_t index, struct vmmfs_node_item *item)
 {
+	struct vmmfs_serialroot *serialroot = (struct vmmfs_serialroot *)node;
 	struct vmmfs_serialroot_port *entry;
 	uint64_t current;
 
@@ -549,10 +395,30 @@ vmmfs_serialroot_read_item(struct vmmfs_serialroot *serialroot,
 		if (current++ != index)
 			continue;
 		item->inode = entry->port->node.inode;
-		bcopy(entry->port->name, item->name, sizeof(item->name));
+		item->type = DT_CHR;
+		bcopy(entry->port->name, item->name, strlen(entry->port->name) + 1);
 		lwkt_reltoken(&serialroot->token);
 		return (0);
 	}
 	lwkt_reltoken(&serialroot->token);
 	return (ENOENT);
+}
+
+static int
+vmmfs_serialroot_remove_item(struct vmmfs_node *node, const char *name,
+    size_t length, struct ucred *cred)
+{
+	struct vmmfs_serialroot *serialroot = (struct vmmfs_serialroot *)node;
+	struct vnode *vnode;
+	int error;
+
+	(void)cred;
+	error = vmmfs_serialroot_get_item(node, name, length, &vnode);
+	if (error != 0)
+		return (error);
+	error = vmmfs_serialroot_remove_port(serialroot, vnode);
+	if (error == 0)
+		cache_inval_vp(node->vnode, CINV_CHILDREN);
+	vrele(vnode);
+	return (error);
 }

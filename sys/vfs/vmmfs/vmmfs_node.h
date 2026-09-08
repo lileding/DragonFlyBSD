@@ -19,6 +19,7 @@ struct ucred;
 struct vop_ops;
 struct vmmfs_node;
 struct vmmfs_node_item;
+extern struct vop_ops vmmfs_node_vops;
 
 typedef int (*vmmfs_node_load_t)(struct vmmfs_node *, char *, size_t,
 	size_t *);
