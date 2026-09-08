@@ -86,8 +86,6 @@ vmmfs_machine_id_drop(struct vmmfs_node *node)
 
 	identity = (struct vmmfs_machine_id *)node;
 	KKASSERT(identity != NULL);
-	identity->node.inode = 0;
-
 }
 
 static int
