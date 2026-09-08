@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Verify detached PCI auth files retain the VMMFS module, including SCM_RIGHTS."""
+from pci_descriptor import descriptor
 import argparse
 import array
 from concurrent.futures import ThreadPoolExecutor
@@ -74,9 +75,7 @@ try:
     before = descriptors()
     fd = os.open(slot / "descriptor", os.O_WRONLY)
     try:
-        value = (b"version=1\nheader.type=endpoint\nvendor_id=0x1234\n"
-                 b"device_id=1\nsubsystem_vendor_id=0x1234\n"
-                 b"subsystem_device_id=1\nclass=0xff0000\nrevision=0\nintx.pin=none\n")
+        value = (descriptor())
         assert os.write(fd, value) == len(value)
     finally:
         os.close(fd)

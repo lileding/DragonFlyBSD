@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Privileged powered ABI check; pass an empty VMMFS mount, no guest runs."""
 
+from pci_descriptor import descriptor
 import errno, fcntl, os, pathlib, select, sys
 from contextlib import closing
 root = pathlib.Path(sys.argv[1]); machine = root/'test'
 def store(p, text):
     fd = os.open(p, os.O_WRONLY)
-    try: assert os.write(fd, text.encode()) == len(text)
+    try: assert os.write(fd, (text.encode() if isinstance(text, str) else text)) == len(text)
     finally: os.close(fd)
 def fds():
     result = set()
@@ -22,13 +23,10 @@ try:
     store(machine/'vcpu', '1')
     slot.mkdir()
     assert set(os.listdir(slot)) == {'descriptor', 'powered'}
-    description = ('version=1\nheader.type=endpoint\nvendor_id=0x1234\n'
-        'device_id=1\nsubsystem_vendor_id=0x1234\nsubsystem_device_id=1\n'
-        'class=0xff0000\nrevision=0\nintx.pin=none\n'
-        'bar0.type=mem32\nbar0.size=4096\nbar0.prefetchable=0\n')
+    description = (descriptor(bars=((4096, 2, 0),)))
     before = fds(); store(slot/'descriptor', description)
     auth = fds() - before; assert len(auth) == 1; handles += list(auth)
-    assert (slot/'descriptor').read_text() == description
+    assert 'bar0.type=mem32\nbar0.size=0x1000\n' in (slot/'descriptor').read_text()
     powered = os.open(slot/'powered', os.O_RDONLY); handles.append(powered)
     inode = os.fstat(powered).st_ino
     for unused in range(2):

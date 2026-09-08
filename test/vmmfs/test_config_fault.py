@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise config copyout failure and readiness using a tiny real guest."""
+from pci_descriptor import descriptor
 import argparse
 import ctypes
 from contextlib import closing
@@ -116,11 +117,7 @@ try:
         slot.mkdir()
         before = descriptors()
         store(slot / "descriptor",
-              b"version=1\nheader.type=endpoint\nvendor_id=0x1234\n"
-              b"device_id=1\nsubsystem_vendor_id=0x1234\nsubsystem_device_id=1\n"
-              b"class=0xff0000\nrevision=0\nintx.pin=none\n"
-              b"bar0.type=io\nbar0.size=4\nbar0.prefetchable=0\n"
-              b"config0.bar=0\nconfig0.offset=0\nconfig0.width=1\nconfig0.space=pio\n")
+              descriptor(bars=((4, 1, 0),), configs=((0, 0, 1, 2),)))
         added = descriptors() - before
         assert len(added) == 1, added
         auth = added.pop()

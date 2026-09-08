@@ -11,6 +11,7 @@
 #include <sys/param.h>
 #include <sys/proc.h>
 #include <sys/stat.h>
+#include <sys/stdarg.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
@@ -28,62 +29,12 @@
 
 #define VMMFS_PCISLOT_DESCRIPTOR_MODE 0644
 
-#define VMMFS_DESCRIPTOR_VERSION 0x0001
-#define VMMFS_DESCRIPTOR_VENDOR 0x0002
-#define VMMFS_DESCRIPTOR_DEVICE 0x0004
-#define VMMFS_DESCRIPTOR_SUBSYSTEM_VENDOR 0x0008
-#define VMMFS_DESCRIPTOR_SUBSYSTEM_DEVICE 0x0010
-#define VMMFS_DESCRIPTOR_CLASS 0x0020
-#define VMMFS_DESCRIPTOR_REVISION 0x0040
-#define VMMFS_DESCRIPTOR_HEADER_TYPE 0x0080
-#define VMMFS_DESCRIPTOR_INTX_PIN 0x0100
-
-#define VMMFS_DESCRIPTOR_BAR_TYPE 0x01
-#define VMMFS_DESCRIPTOR_BAR_SIZE 0x02
-#define VMMFS_DESCRIPTOR_BAR_PREFETCHABLE 0x04
-
-#define VMMFS_DESCRIPTOR_DOORBELL_BAR 0x01
-#define VMMFS_DESCRIPTOR_DOORBELL_OFFSET 0x02
-#define VMMFS_DESCRIPTOR_DOORBELL_WIDTH 0x04
-#define VMMFS_DESCRIPTOR_DOORBELL_SIZE 0x08
-#define VMMFS_DESCRIPTOR_DOORBELL_SPACE 0x10
-
-#define VMMFS_DESCRIPTOR_CONFIG_BAR 0x01
-#define VMMFS_DESCRIPTOR_CONFIG_OFFSET 0x02
-#define VMMFS_DESCRIPTOR_CONFIG_WIDTH 0x04
-#define VMMFS_DESCRIPTOR_CONFIG_SPACE 0x08
-
-#define VMMFS_DESCRIPTOR_CAP_KIND 0x0001
-#define VMMFS_DESCRIPTOR_CAP_VECTORS 0x0002
-#define VMMFS_DESCRIPTOR_CAP_ADDRESS_WIDTH 0x0004
-#define VMMFS_DESCRIPTOR_CAP_MASKABLE 0x0008
-#define VMMFS_DESCRIPTOR_CAP_TABLE_BAR 0x0010
-#define VMMFS_DESCRIPTOR_CAP_TABLE_OFFSET 0x0020
-#define VMMFS_DESCRIPTOR_CAP_PBA_BAR 0x0040
-#define VMMFS_DESCRIPTOR_CAP_PBA_OFFSET 0x0080
-#define VMMFS_DESCRIPTOR_CAP_ID 0x0100
-#define VMMFS_DESCRIPTOR_CAP_ACCESS 0x0200
-#define VMMFS_DESCRIPTOR_CAP_DATA 0x0400
-
-#define VMMFS_DESCRIPTOR_ECAP_ID 0x01
-#define VMMFS_DESCRIPTOR_ECAP_VERSION 0x02
-#define VMMFS_DESCRIPTOR_ECAP_ACCESS 0x04
-#define VMMFS_DESCRIPTOR_ECAP_DATA 0x08
-
 static int vmmfs_pcislot_descriptor_open(struct vop_open_args *);
 static int vmmfs_pcislot_descriptor_load(struct vmmfs_node *, char *, size_t, size_t *);
 static int vmmfs_pcislot_descriptor_store(struct vmmfs_node *, const char *, size_t);
-static int vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *,
-	const char *, size_t, struct vmmfs_pcislot_descriptor_value *);
-static int vmmfs_pcislot_descriptor_parse_number(const char *, size_t,
-	uint64_t *);
-static int vmmfs_pcislot_descriptor_parse_boolean(const char *, size_t,
-	bool *);
-static int vmmfs_pcislot_descriptor_parse_bytes(const char *, size_t,
-	struct vmmfs_pcislot_descriptor_value *, uint16_t *, uint16_t *);
-static int vmmfs_pcislot_descriptor_index_key(const char *, size_t,
-	const char *, const char *, unsigned int, unsigned int *);
-static bool vmmfs_pcislot_descriptor_key(const char *, size_t, const char *);
+static int vmmfs_pcislot_descriptor_parse(const char *, size_t, struct vmmfs_pcislot_descriptor_value *);
+static int vmmfs_pcislot_descriptor_validate(const struct vmmfs_pcislot_descriptor_value *);
+static int vmmfs_pcislot_descriptor_render(struct vmmfs_pcislot_descriptor_value *);
 static bool vmmfs_pcislot_descriptor_ranges_overlap(uint64_t, uint64_t,
 	uint64_t, uint64_t);
 static void vmmfs_pcislot_descriptor_drop(struct vmmfs_node *);
@@ -146,7 +97,7 @@ vmmfs_pcislot_descriptor_init(struct vmmfs_node *parent,
 	descriptor->node.drop = vmmfs_pcislot_descriptor_drop;
 	vmmfs_node_hold(parent);
 	descriptor->node.load_limit = VMMFS_PCISLOT_DESCRIPTOR_MAX;
-	descriptor->node.store_limit = VMMFS_PCISLOT_DESCRIPTOR_MAX - 1;
+	descriptor->node.store_limit = VMMFS_PCI_DESCRIPTOR_MAX;
 	descriptor->node.load = vmmfs_pcislot_descriptor_load;
 	descriptor->node.store = vmmfs_pcislot_descriptor_store;
 	descriptor->node.mode = VMMFS_PCISLOT_DESCRIPTOR_MODE;
@@ -251,8 +202,7 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 		buffer = kmalloc(length, M_VMMFS, M_WAITOK);
 		bcopy(text, buffer, length);
 		value = kmalloc(sizeof(*value), M_VMMFS, M_WAITOK | M_ZERO);
-		error = vmmfs_pcislot_descriptor_parse(
-		    vmmfs_pcislot_descriptor_slot(descriptor), buffer, length, value);
+		error = vmmfs_pcislot_descriptor_parse(buffer, length, value);
 		if (error != 0)
 			goto failed;
 	}
@@ -326,497 +276,206 @@ finished:
 }
 
 static int
-vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
-	const char *text, size_t length, struct vmmfs_pcislot_descriptor_value *value)
+vmmfs_pcislot_descriptor_parse(const char *text, size_t length, struct vmmfs_pcislot_descriptor_value *value)
 {
-	uint32_t fields;
-	uint8_t bars[VMMFS_PCISLOT_MAX_BARS];
-	uint8_t doorbells[VMMFS_PCISLOT_MAX_DOORBELLS];
-	uint8_t configs[VMMFS_PCISLOT_MAX_CONFIGS];
-	uint16_t caps[VMMFS_PCISLOT_MAX_CAPS];
-	uint8_t ecaps[VMMFS_PCISLOT_MAX_ECAPS];
-	const char *line;
-	const char *equals;
+	struct vmmfs_pci_descriptor header;
+	struct vmmfs_pci_doorbell doorbell;
+	struct vmmfs_pci_register reg;
+	struct vmmfs_pci_capability cap, expected;
+	struct vmmfs_pci_ext_capability ecap;
 	const char *cursor;
-	const char *end;
-	size_t line_length;
-	size_t key_length;
-	size_t value_length;
-	uint64_t number;
-	uint64_t range_size;
-	size_t line_number;
+	size_t size;
+	uint32_t config_offset, cap_size;
 	unsigned int index;
-	unsigned int bar;
-	unsigned int other;
-	unsigned int cap;
-	unsigned int ecap;
-	unsigned int pcie_caps;
-	bool boolean;
-	bool gap;
-	uint8_t cap_kind;
 	int error;
+	static const uint8_t zero[6];
 
-	if (slot == NULL || text == NULL || value == NULL || length == 0 ||
-	    length >= VMMFS_PCISLOT_DESCRIPTOR_MAX || text[length - 1] != '\n')
+	if (length < sizeof(header))
+		return (EINVAL);
+	bcopy(text, &header, sizeof(header));
+	if (header.version != VMMFS_PCI_DESCRIPTOR_VERSION || header.reserved ||
+	    header.class_code > 0xffffff || header.intx_pin > 4 ||
+	    header.doorbell_count > VMMFS_PCI_MAX_DOORBELLS ||
+	    header.config_count > VMMFS_PCI_MAX_CONFIGS ||
+	    header.cap_count > VMMFS_PCI_MAX_CAPS ||
+	    header.ecap_count > VMMFS_PCI_MAX_ECAPS ||
+	    header.data_size > VMMFS_PCI_MAX_DATA)
+		return (EINVAL);
+	/* Bounded counts make this sum overflow-free on every host ABI. */
+	size = sizeof(header) + header.doorbell_count * sizeof(doorbell) +
+	    header.config_count * sizeof(reg) + header.cap_count * sizeof(cap) +
+	    header.ecap_count * sizeof(ecap) + header.data_size;
+	if (length != size)
 		return (EINVAL);
 	bzero(value, sizeof(*value));
-	bzero(bars, sizeof(bars));
-	bzero(doorbells, sizeof(doorbells));
-	bzero(configs, sizeof(configs));
-	bzero(caps, sizeof(caps));
-	bzero(ecaps, sizeof(ecaps));
-	fields = 0;
-	line_number = 0;
-	line = text;
-	end = text + length;
-	while (line < end) {
-		equals = NULL;
-		for (cursor = line; cursor < end && *cursor != '\n'; ++cursor) {
-			if (*cursor == '=') {
-				if (equals != NULL)
-					return (EINVAL);
-				equals = cursor;
-			}
-		}
-		if (cursor == end)
-			return (EINVAL);
-		line_length = (size_t)(cursor - line);
-		if (line_length == 0 || equals == NULL || equals == line ||
-		    equals >= line + line_length)
-			return (EINVAL);
-		key_length = (size_t)(equals - line);
-		value_length = line_length - key_length - 1;
-		if (value_length == 0)
-			return (EINVAL);
-		if (vmmfs_pcislot_descriptor_key(line, key_length, "version")) {
-			if (fields & VMMFS_DESCRIPTOR_VERSION)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number != 1)
-				return (EINVAL);
-			fields |= VMMFS_DESCRIPTOR_VERSION;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "vendor_id")) {
-			if (fields & VMMFS_DESCRIPTOR_VENDOR)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > UINT16_MAX)
-				return (EINVAL);
-			value->vendor_id = number;
-			fields |= VMMFS_DESCRIPTOR_VENDOR;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "device_id")) {
-			if (fields & VMMFS_DESCRIPTOR_DEVICE)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > UINT16_MAX)
-				return (EINVAL);
-			value->device_id = number;
-			fields |= VMMFS_DESCRIPTOR_DEVICE;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "subsystem_vendor_id")) {
-			if (fields & VMMFS_DESCRIPTOR_SUBSYSTEM_VENDOR)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > UINT16_MAX)
-				return (EINVAL);
-			value->subsystem_vendor_id = number;
-			fields |= VMMFS_DESCRIPTOR_SUBSYSTEM_VENDOR;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "subsystem_device_id")) {
-			if (fields & VMMFS_DESCRIPTOR_SUBSYSTEM_DEVICE)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > UINT16_MAX)
-				return (EINVAL);
-			value->subsystem_device_id = number;
-			fields |= VMMFS_DESCRIPTOR_SUBSYSTEM_DEVICE;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length, "class")) {
-			if (fields & VMMFS_DESCRIPTOR_CLASS)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > 0x00ffffffU)
-				return (EINVAL);
-			value->class = number;
-			fields |= VMMFS_DESCRIPTOR_CLASS;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "revision")) {
-			if (fields & VMMFS_DESCRIPTOR_REVISION)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > UINT8_MAX)
-				return (EINVAL);
-			value->revision = number;
-			fields |= VMMFS_DESCRIPTOR_REVISION;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "header.type")) {
-			if (fields & VMMFS_DESCRIPTOR_HEADER_TYPE || value_length != 8 ||
-			    bcmp(equals + 1, "endpoint", 8) != 0)
-				return (EINVAL);
-			fields |= VMMFS_DESCRIPTOR_HEADER_TYPE;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "intx.pin")) {
-			if (fields & VMMFS_DESCRIPTOR_INTX_PIN)
-				return (EINVAL);
-			if (value_length == 4 && bcmp(equals + 1, "none", 4) == 0)
-				value->intx_pin = VMMFS_PCISLOT_INTX_NONE;
-			else if (value_length == 1 && equals[1] >= 'a' && equals[1] <= 'd')
-				value->intx_pin = VMMFS_PCISLOT_INTX_A + equals[1] - 'a';
-			else
-				return (EINVAL);
-			fields |= VMMFS_DESCRIPTOR_INTX_PIN;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "bar", "type", VMMFS_PCISLOT_MAX_BARS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || bars[index] & VMMFS_DESCRIPTOR_BAR_TYPE)
-				return (EINVAL);
-			if (value_length == 2 && bcmp(equals + 1, "io", 2) == 0)
-				value->bars[index].type = VMMFS_PCISLOT_BAR_IO;
-			else if (value_length == 5 && bcmp(equals + 1, "mem32", 5) == 0)
-				value->bars[index].type = VMMFS_PCISLOT_BAR_MEM32;
-			else if (value_length == 5 && bcmp(equals + 1, "mem64", 5) == 0)
-				value->bars[index].type = VMMFS_PCISLOT_BAR_MEM64;
-			else
-				return (EINVAL);
-			value->bars[index].present = true;
-			bars[index] |= VMMFS_DESCRIPTOR_BAR_TYPE;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "bar", "size", VMMFS_PCISLOT_MAX_BARS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || bars[index] & VMMFS_DESCRIPTOR_BAR_SIZE)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number == 0 ||
-			    (number & (number - 1)) != 0)
-				return (EINVAL);
-			value->bars[index].size = number;
-			bars[index] |= VMMFS_DESCRIPTOR_BAR_SIZE;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "bar", "prefetchable", VMMFS_PCISLOT_MAX_BARS,
-		    &index)) != ENOENT) {
-			if (error != 0 || bars[index] & VMMFS_DESCRIPTOR_BAR_PREFETCHABLE)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_boolean(equals + 1,
-			    value_length, &boolean);
-			if (error != 0)
-				return (error);
-			value->bars[index].prefetchable = boolean;
-			bars[index] |= VMMFS_DESCRIPTOR_BAR_PREFETCHABLE;
-		} else if (vmmfs_pcislot_descriptor_key(line, key_length,
-		    "rom.size")) {
-			if (value->rom_present)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number < PAGE_SIZE ||
-			    (number & (number - 1)) != 0)
-				return (EINVAL);
-			value->rom_present = true;
-			value->rom_size = number;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "doorbell", "bar", VMMFS_PCISLOT_MAX_DOORBELLS,
-		    &index)) != ENOENT) {
-			if (error != 0 || doorbells[index] & VMMFS_DESCRIPTOR_DOORBELL_BAR)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number >= VMMFS_PCISLOT_MAX_BARS)
-				return (EINVAL);
-			value->doorbells[index].present = true;
-			value->doorbells[index].bar = number;
-			doorbells[index] |= VMMFS_DESCRIPTOR_DOORBELL_BAR;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "doorbell", "offset", VMMFS_PCISLOT_MAX_DOORBELLS,
-		    &index)) != ENOENT) {
-			if (error != 0 || doorbells[index] & VMMFS_DESCRIPTOR_DOORBELL_OFFSET)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0)
-				return (error);
-			value->doorbells[index].offset = number;
-			doorbells[index] |= VMMFS_DESCRIPTOR_DOORBELL_OFFSET;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "doorbell", "width", VMMFS_PCISLOT_MAX_DOORBELLS,
-		    &index)) != ENOENT) {
-			if (error != 0 || doorbells[index] & VMMFS_DESCRIPTOR_DOORBELL_WIDTH)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || (number != 1 && number != 2 && number != 4 &&
-			    number != 8))
-				return (EINVAL);
-			value->doorbells[index].width = number;
-			doorbells[index] |= VMMFS_DESCRIPTOR_DOORBELL_WIDTH;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "doorbell", "size", VMMFS_PCISLOT_MAX_DOORBELLS,
-		    &index)) != ENOENT) {
-			if (error != 0 || doorbells[index] & VMMFS_DESCRIPTOR_DOORBELL_SIZE)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number == 0)
-				return (EINVAL);
-			value->doorbells[index].size = number;
-			doorbells[index] |= VMMFS_DESCRIPTOR_DOORBELL_SIZE;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "doorbell", "space", VMMFS_PCISLOT_MAX_DOORBELLS,
-		    &index)) != ENOENT) {
-			if (error != 0 || doorbells[index] & VMMFS_DESCRIPTOR_DOORBELL_SPACE)
-				return (EINVAL);
-			if (value_length == 4 && bcmp(equals + 1, "mmio", 4) == 0)
-				value->doorbells[index].space = VMMFS_PCISLOT_DOORBELL_MMIO;
-			else if (value_length == 3 && bcmp(equals + 1, "pio", 3) == 0)
-				value->doorbells[index].space = VMMFS_PCISLOT_DOORBELL_PIO;
-			else
-				return (EINVAL);
-			doorbells[index] |= VMMFS_DESCRIPTOR_DOORBELL_SPACE;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "config", "bar", VMMFS_PCISLOT_MAX_CONFIGS,
-		    &index)) != ENOENT) {
-			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_BAR)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number >= VMMFS_PCISLOT_MAX_BARS)
-				return (EINVAL);
-			value->configs[index].present = true;
-			value->configs[index].bar = number;
-			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_BAR;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "config", "offset", VMMFS_PCISLOT_MAX_CONFIGS,
-		    &index)) != ENOENT) {
-			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_OFFSET)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0)
-				return (error);
-			value->configs[index].offset = number;
-			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_OFFSET;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "config", "width", VMMFS_PCISLOT_MAX_CONFIGS,
-		    &index)) != ENOENT) {
-			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_WIDTH)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || (number != 1 && number != 2 && number != 4 &&
-			    number != 8))
-				return (EINVAL);
-			value->configs[index].width = number;
-			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_WIDTH;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "config", "space", VMMFS_PCISLOT_MAX_CONFIGS,
-		    &index)) != ENOENT) {
-			if (error != 0 || configs[index] & VMMFS_DESCRIPTOR_CONFIG_SPACE)
-				return (EINVAL);
-			if (value_length == 4 && bcmp(equals + 1, "mmio", 4) == 0)
-				value->configs[index].space = VMMFS_PCISLOT_CONFIG_MMIO;
-			else if (value_length == 3 && bcmp(equals + 1, "pio", 3) == 0)
-				value->configs[index].space = VMMFS_PCISLOT_CONFIG_PIO;
-			else
-				return (EINVAL);
-			configs[index] |= VMMFS_DESCRIPTOR_CONFIG_SPACE;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "kind", VMMFS_PCISLOT_MAX_CAPS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_KIND)
-				return (EINVAL);
-			if (value_length == 4 && bcmp(equals + 1, "pcie", 4) == 0)
-				value->caps[index].kind = VMMFS_PCISLOT_CAP_PCIE;
-			else if (value_length == 3 && bcmp(equals + 1, "msi", 3) == 0)
-				value->caps[index].kind = VMMFS_PCISLOT_CAP_MSI;
-			else if (value_length == 4 && bcmp(equals + 1, "msix", 4) == 0)
-				value->caps[index].kind = VMMFS_PCISLOT_CAP_MSIX;
-			else if (value_length == 4 && bcmp(equals + 1, "blob", 4) == 0)
-				value->caps[index].kind = VMMFS_PCISLOT_CAP_BLOB;
-			else
-				return (EINVAL);
-			value->caps[index].present = true;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_KIND;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "vectors", VMMFS_PCISLOT_MAX_CAPS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_VECTORS)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number == 0 || number > VMMFS_PCISLOT_MAX_MSIX_VECTORS)
-				return (EINVAL);
-			value->caps[index].vectors = number;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_VECTORS;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "address_width", VMMFS_PCISLOT_MAX_CAPS,
-		    &index)) != ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_ADDRESS_WIDTH)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || (number != 32 && number != 64))
-				return (EINVAL);
-			value->caps[index].address_width = number;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_ADDRESS_WIDTH;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "maskable", VMMFS_PCISLOT_MAX_CAPS,
-		    &index)) != ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_MASKABLE)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_boolean(equals + 1,
-			    value_length, &boolean);
-			if (error != 0)
-				return (error);
-			value->caps[index].maskable = boolean;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_MASKABLE;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "table.bar", VMMFS_PCISLOT_MAX_CAPS,
-		    &index)) != ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_TABLE_BAR)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number >= VMMFS_PCISLOT_MAX_BARS)
-				return (EINVAL);
-			value->caps[index].table_bar = number;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_TABLE_BAR;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "table.offset", VMMFS_PCISLOT_MAX_CAPS,
-		    &index)) != ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_TABLE_OFFSET)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0)
-				return (error);
-			value->caps[index].table_offset = number;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_TABLE_OFFSET;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "pba.bar", VMMFS_PCISLOT_MAX_CAPS,
-		    &index)) != ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_PBA_BAR)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number >= VMMFS_PCISLOT_MAX_BARS)
-				return (EINVAL);
-			value->caps[index].pba_bar = number;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_PBA_BAR;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "pba.offset", VMMFS_PCISLOT_MAX_CAPS,
-		    &index)) != ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_PBA_OFFSET)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0)
-				return (error);
-			value->caps[index].pba_offset = number;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_PBA_OFFSET;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "id", VMMFS_PCISLOT_MAX_CAPS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_ID)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > UINT8_MAX)
-				return (EINVAL);
-			value->caps[index].id = number;
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_ID;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "access", VMMFS_PCISLOT_MAX_CAPS, &index)) !=
-		    ENOENT) {
-				if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_ACCESS) {
-					return (EINVAL);
-				}
-				if (value_length != 6 ||
-				    bcmp(equals + 1, "static", 6) != 0) {
-					return (EINVAL);
-				}
-				value->caps[index].access = VMMFS_PCISLOT_CAP_STATIC;
-				caps[index] |= VMMFS_DESCRIPTOR_CAP_ACCESS;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "cap", "data", VMMFS_PCISLOT_MAX_CAPS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || caps[index] & VMMFS_DESCRIPTOR_CAP_DATA)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_bytes(equals + 1,
-			    value_length, value, &value->caps[index].data_offset,
-			    &value->caps[index].data_length);
-			if (error != 0)
-				return (error);
-			caps[index] |= VMMFS_DESCRIPTOR_CAP_DATA;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "ecap", "id", VMMFS_PCISLOT_MAX_ECAPS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || ecaps[index] & VMMFS_DESCRIPTOR_ECAP_ID)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number > UINT16_MAX)
-				return (EINVAL);
-			value->ecaps[index].present = true;
-			value->ecaps[index].id = number;
-			ecaps[index] |= VMMFS_DESCRIPTOR_ECAP_ID;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "ecap", "version", VMMFS_PCISLOT_MAX_ECAPS,
-		    &index)) != ENOENT) {
-			if (error != 0 || ecaps[index] & VMMFS_DESCRIPTOR_ECAP_VERSION)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_number(equals + 1,
-			    value_length, &number);
-			if (error != 0 || number == 0 || number > 15)
-				return (EINVAL);
-			value->ecaps[index].version = number;
-			ecaps[index] |= VMMFS_DESCRIPTOR_ECAP_VERSION;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "ecap", "access", VMMFS_PCISLOT_MAX_ECAPS,
-		    &index)) != ENOENT) {
-				if (error != 0 || ecaps[index] & VMMFS_DESCRIPTOR_ECAP_ACCESS) {
-					return (EINVAL);
-				}
-				if (value_length != 6 ||
-				    bcmp(equals + 1, "static", 6) != 0) {
-					return (EINVAL);
-				}
-				value->ecaps[index].access = VMMFS_PCISLOT_CAP_STATIC;
-				ecaps[index] |= VMMFS_DESCRIPTOR_ECAP_ACCESS;
-		} else if ((error = vmmfs_pcislot_descriptor_index_key(line,
-		    key_length, "ecap", "data", VMMFS_PCISLOT_MAX_ECAPS, &index)) !=
-		    ENOENT) {
-			if (error != 0 || ecaps[index] & VMMFS_DESCRIPTOR_ECAP_DATA)
-				return (EINVAL);
-			error = vmmfs_pcislot_descriptor_parse_bytes(equals + 1,
-			    value_length, value, &value->ecaps[index].data_offset,
-			    &value->ecaps[index].data_length);
-			if (error != 0)
-				return (error);
-			ecaps[index] |= VMMFS_DESCRIPTOR_ECAP_DATA;
-		} else {
-			return (EINVAL);
-		}
-		line += line_length + 1;
-		++line_number;
-	}
-	if (fields != (VMMFS_DESCRIPTOR_VERSION | VMMFS_DESCRIPTOR_VENDOR |
-	    VMMFS_DESCRIPTOR_DEVICE | VMMFS_DESCRIPTOR_SUBSYSTEM_VENDOR |
-	    VMMFS_DESCRIPTOR_SUBSYSTEM_DEVICE | VMMFS_DESCRIPTOR_CLASS |
-	    VMMFS_DESCRIPTOR_REVISION | VMMFS_DESCRIPTOR_HEADER_TYPE |
-	    VMMFS_DESCRIPTOR_INTX_PIN))
+	value->vendor_id = header.vendor_id;
+	value->device_id = header.device_id;
+	value->subsystem_vendor_id = header.subsystem_vendor_id;
+	value->subsystem_device_id = header.subsystem_device_id;
+	value->class = header.class_code;
+	value->revision = header.revision;
+	value->intx_pin = header.intx_pin;
+	value->rom_size = header.rom_size;
+	value->rom_present = header.rom_size != 0;
+	if (header.rom_size != 0 && (header.rom_size < PAGE_SIZE ||
+	    header.rom_size > (1ULL << 32) || !powerof2(header.rom_size)))
 		return (EINVAL);
-	for (bar = 0; bar < VMMFS_PCISLOT_MAX_BARS; ++bar) {
-		if (bars[bar] != 0 && bars[bar] !=
-		    (VMMFS_DESCRIPTOR_BAR_TYPE | VMMFS_DESCRIPTOR_BAR_SIZE |
-		    VMMFS_DESCRIPTOR_BAR_PREFETCHABLE))
+	for (index = 0; index < VMMFS_PCI_MAX_BARS; ++index) {
+		const struct vmmfs_pci_bar *bar = &header.bars[index];
+		if (bcmp(bar->reserved, zero, sizeof(bar->reserved)) != 0 ||
+		    bar->prefetchable > 1)
 			return (EINVAL);
+		if (bar->size == 0) {
+			if (bar->type != 0 || bar->prefetchable != 0)
+				return (EINVAL);
+			continue;
+		}
+		if (!powerof2(bar->size) || bar->type < VMMFS_PCI_BAR_IO ||
+		    bar->type > VMMFS_PCI_BAR_MEM64 ||
+		    (bar->type == VMMFS_PCI_BAR_IO && bar->size > 0x10000) ||
+		    (bar->type == VMMFS_PCI_BAR_MEM32 && bar->size > (1ULL << 32)))
+			return (EINVAL);
+		value->bars[index].present = true;
+		value->bars[index].type = bar->type;
+		value->bars[index].size = bar->size;
+		value->bars[index].prefetchable = bar->prefetchable;
+	}
+	cursor = text + sizeof(header);
+	for (index = 0; index < header.doorbell_count; ++index) {
+		bcopy(cursor, &doorbell, sizeof(doorbell));
+		cursor += sizeof(doorbell);
+		if (bcmp(doorbell.reserved, zero, sizeof(doorbell.reserved)) != 0 ||
+		    doorbell.bar >= VMMFS_PCI_MAX_BARS || doorbell.size == 0 ||
+		    (doorbell.width != 1 && doorbell.width != 2 &&
+		    doorbell.width != 4 && doorbell.width != 8) ||
+		    (doorbell.space != VMMFS_PCI_CONFIG_MMIO &&
+		    doorbell.space != VMMFS_PCI_CONFIG_PIO))
+			return (EINVAL);
+		value->doorbells[index].present = true;
+		value->doorbells[index].bar = doorbell.bar;
+		value->doorbells[index].offset = doorbell.offset;
+		value->doorbells[index].size = doorbell.size;
+		value->doorbells[index].width = doorbell.width;
+		value->doorbells[index].space = doorbell.space == VMMFS_PCI_CONFIG_MMIO ?
+		    VMMFS_PCISLOT_DOORBELL_MMIO : VMMFS_PCISLOT_DOORBELL_PIO;
+	}
+	for (index = 0; index < header.config_count; ++index) {
+		bcopy(cursor, &reg, sizeof(reg));
+		cursor += sizeof(reg);
+		if (bcmp(reg.reserved, zero, sizeof(reg.reserved)) != 0 ||
+		    reg.bar >= VMMFS_PCI_MAX_BARS ||
+		    (reg.width != 1 && reg.width != 2 && reg.width != 4 && reg.width != 8) ||
+		    (reg.space != VMMFS_PCI_CONFIG_MMIO && reg.space != VMMFS_PCI_CONFIG_PIO))
+			return (EINVAL);
+		value->configs[index].present = true;
+		value->configs[index].bar = reg.bar;
+		value->configs[index].offset = reg.offset;
+		value->configs[index].width = reg.width;
+		value->configs[index].space = reg.space;
+	}
+	config_offset = 0x40;
+	for (index = 0; index < header.cap_count; ++index) {
+		bcopy(cursor, &cap, sizeof(cap));
+		cursor += sizeof(cap);
+		bzero(&expected, sizeof(expected));
+		expected.kind = cap.kind;
+		switch (cap.kind) {
+		case VMMFS_PCI_CAP_PCIE:
+			cap_size = 0x3c;
+			break;
+		case VMMFS_PCI_CAP_MSI:
+			if (cap.vectors == 0 || cap.vectors > 32 || !powerof2(cap.vectors) ||
+			    (cap.address_width != 32 && cap.address_width != 64) || cap.maskable > 1)
+				return (EINVAL);
+			expected.vectors = cap.vectors;
+			expected.address_width = cap.address_width;
+			expected.maskable = cap.maskable;
+			cap_size = 10 + (cap.address_width == 64 ? 4 : 0) + (cap.maskable ? 8 : 0);
+			break;
+		case VMMFS_PCI_CAP_MSIX:
+			if (cap.vectors == 0 || cap.vectors > VMMFS_PCISLOT_MAX_MSIX_VECTORS ||
+			    cap.table_bar >= VMMFS_PCI_MAX_BARS || cap.pba_bar >= VMMFS_PCI_MAX_BARS ||
+			    cap.table_offset > UINT32_MAX || cap.pba_offset > UINT32_MAX ||
+			    (cap.table_offset & 7) != 0 || (cap.pba_offset & 7) != 0 ||
+			    (cap.table_bar == cap.pba_bar &&
+			    vmmfs_pcislot_descriptor_ranges_overlap(cap.table_offset,
+			    (uint64_t)cap.vectors * 16, cap.pba_offset,
+			    ((uint64_t)cap.vectors + 63) / 64 * 8)))
+				return (EINVAL);
+			expected.vectors = cap.vectors;
+			expected.table_bar = cap.table_bar;
+			expected.pba_bar = cap.pba_bar;
+			expected.table_offset = cap.table_offset;
+			expected.pba_offset = cap.pba_offset;
+			cap_size = 12;
+			break;
+		case VMMFS_PCI_CAP_BLOB:
+			if (cap.data_length == 0 || cap.data_offset > header.data_size ||
+			    cap.data_length > header.data_size - cap.data_offset)
+				return (EINVAL);
+			expected.id = cap.id;
+			expected.data_offset = cap.data_offset;
+			expected.data_length = cap.data_length;
+			cap_size = 3 + cap.data_length;
+			break;
+		default:
+			return (EINVAL);
+		}
+		/* Reject every field not meaningful for this capability kind. */
+		if (bcmp(&cap, &expected, sizeof(cap)) != 0)
+			return (EINVAL);
+		cap_size = (cap_size + 3) & ~3U;
+		if (cap_size > 0x100 - config_offset)
+			return (E2BIG);
+		config_offset += cap_size;
+		value->caps[index].present = true;
+		value->caps[index].kind = cap.kind - 1;
+		value->caps[index].vectors = cap.vectors;
+		value->caps[index].address_width = cap.address_width;
+		value->caps[index].maskable = cap.maskable;
+		value->caps[index].table_bar = cap.table_bar;
+		value->caps[index].pba_bar = cap.pba_bar;
+		value->caps[index].table_offset = cap.table_offset;
+		value->caps[index].pba_offset = cap.pba_offset;
+		value->caps[index].id = cap.id;
+		value->caps[index].data_offset = cap.data_offset;
+		value->caps[index].data_length = cap.data_length;
+	}
+	config_offset = 0x100;
+	for (index = 0; index < header.ecap_count; ++index) {
+		bcopy(cursor, &ecap, sizeof(ecap));
+		cursor += sizeof(ecap);
+		if (bcmp(ecap.reserved, zero, sizeof(ecap.reserved)) != 0 ||
+		    ecap.version == 0 || ecap.version > 15 || ecap.data_length == 0 ||
+		    ecap.data_offset > header.data_size ||
+		    ecap.data_length > header.data_size - ecap.data_offset)
+			return (EINVAL);
+		cap_size = (4 + ecap.data_length + 3) & ~3U;
+		if (cap_size > 0x1000 - config_offset)
+			return (E2BIG);
+		config_offset += cap_size;
+		value->ecaps[index].present = true;
+		value->ecaps[index].id = ecap.id;
+		value->ecaps[index].version = ecap.version;
+		value->ecaps[index].data_offset = ecap.data_offset;
+		value->ecaps[index].data_length = ecap.data_length;
+	}
+	bcopy(cursor, value->cap_data, header.data_size);
+	value->cap_data_length = header.data_size;
+	error = vmmfs_pcislot_descriptor_validate(value);
+	if (error == 0)
+		error = vmmfs_pcislot_descriptor_render(value);
+	return (error);
+}
+
+static int
+vmmfs_pcislot_descriptor_validate(const struct vmmfs_pcislot_descriptor_value *value)
+{
+	uint64_t range_size;
+	unsigned int bar, index, other, cap, pcie_caps;
+	uint8_t cap_kind;
+
+	for (bar = 0; bar < VMMFS_PCISLOT_MAX_BARS; ++bar) {
 		if (!value->bars[bar].present)
 			continue;
 		if ((value->bars[bar].type == VMMFS_PCISLOT_BAR_IO &&
@@ -828,16 +487,13 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 		    value->bars[bar].prefetchable)
 			return (EINVAL);
 		if (value->bars[bar].type == VMMFS_PCISLOT_BAR_MEM64 &&
-		    (bar == VMMFS_PCISLOT_MAX_BARS - 1 || bars[bar + 1] != 0))
+		    (bar == VMMFS_PCISLOT_MAX_BARS - 1 || value->bars[bar + 1].present))
 			return (EINVAL);
 	}
 	for (index = 0; index < VMMFS_PCISLOT_MAX_DOORBELLS; ++index) {
-		if (doorbells[index] == 0)
+		if (!value->doorbells[index].present)
 			continue;
-		if (doorbells[index] != (VMMFS_DESCRIPTOR_DOORBELL_BAR |
-		    VMMFS_DESCRIPTOR_DOORBELL_OFFSET | VMMFS_DESCRIPTOR_DOORBELL_WIDTH |
-		    VMMFS_DESCRIPTOR_DOORBELL_SIZE | VMMFS_DESCRIPTOR_DOORBELL_SPACE) ||
-		    !value->bars[value->doorbells[index].bar].present ||
+		if (!value->bars[value->doorbells[index].bar].present ||
 		    value->doorbells[index].offset > value->bars[
 		    value->doorbells[index].bar].size || value->doorbells[index].size >
 		    value->bars[value->doorbells[index].bar].size -
@@ -860,16 +516,10 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 				return (EINVAL);
 		}
 	}
-	gap = false;
 	for (index = 0; index < VMMFS_PCISLOT_MAX_CONFIGS; ++index) {
-		if (configs[index] == 0) {
-			gap = true;
+		if (!value->configs[index].present)
 			continue;
-		}
-		if (gap || configs[index] != (VMMFS_DESCRIPTOR_CONFIG_BAR |
-		    VMMFS_DESCRIPTOR_CONFIG_OFFSET | VMMFS_DESCRIPTOR_CONFIG_WIDTH |
-		    VMMFS_DESCRIPTOR_CONFIG_SPACE) ||
-		    !value->bars[value->configs[index].bar].present ||
+		if (!value->bars[value->configs[index].bar].present ||
 		    value->configs[index].offset > value->bars[
 		    value->configs[index].bar].size || value->configs[index].width >
 		    value->bars[value->configs[index].bar].size -
@@ -899,29 +549,11 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 				return (EINVAL);
 		}
 	}
-	gap = false;
 	pcie_caps = 0;
 	for (cap = 0; cap < VMMFS_PCISLOT_MAX_CAPS; ++cap) {
-		if (caps[cap] == 0) {
-			gap = true;
+		if (!value->caps[cap].present)
 			continue;
-		}
-		if (gap)
-			return (EINVAL);
 		cap_kind = value->caps[cap].kind;
-		if ((cap_kind == VMMFS_PCISLOT_CAP_PCIE &&
-		    caps[cap] != VMMFS_DESCRIPTOR_CAP_KIND) ||
-		    (cap_kind == VMMFS_PCISLOT_CAP_MSI && caps[cap] !=
-		    (VMMFS_DESCRIPTOR_CAP_KIND | VMMFS_DESCRIPTOR_CAP_VECTORS |
-		    VMMFS_DESCRIPTOR_CAP_ADDRESS_WIDTH | VMMFS_DESCRIPTOR_CAP_MASKABLE)) ||
-		    (cap_kind == VMMFS_PCISLOT_CAP_MSIX && caps[cap] !=
-		    (VMMFS_DESCRIPTOR_CAP_KIND | VMMFS_DESCRIPTOR_CAP_VECTORS |
-		    VMMFS_DESCRIPTOR_CAP_TABLE_BAR | VMMFS_DESCRIPTOR_CAP_TABLE_OFFSET |
-		    VMMFS_DESCRIPTOR_CAP_PBA_BAR | VMMFS_DESCRIPTOR_CAP_PBA_OFFSET)) ||
-		    (cap_kind == VMMFS_PCISLOT_CAP_BLOB && caps[cap] !=
-		    (VMMFS_DESCRIPTOR_CAP_KIND | VMMFS_DESCRIPTOR_CAP_ID |
-		    VMMFS_DESCRIPTOR_CAP_ACCESS | VMMFS_DESCRIPTOR_CAP_DATA)))
-			return (EINVAL);
 		if (cap_kind == VMMFS_PCISLOT_CAP_PCIE && ++pcie_caps != 1)
 			return (EINVAL);
 		if (cap_kind == VMMFS_PCISLOT_CAP_MSI &&
@@ -933,8 +565,7 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 		if (!value->bars[value->caps[cap].table_bar].present ||
 		    !value->bars[value->caps[cap].pba_bar].present ||
 		    value->bars[value->caps[cap].table_bar].type == VMMFS_PCISLOT_BAR_IO ||
-		    value->bars[value->caps[cap].pba_bar].type == VMMFS_PCISLOT_BAR_IO ||
-		    value->caps[cap].vectors > UINT64_MAX / 16)
+		    value->bars[value->caps[cap].pba_bar].type == VMMFS_PCISLOT_BAR_IO)
 			return (EINVAL);
 		range_size = (uint64_t)value->caps[cap].vectors * 16;
 		if (value->caps[cap].table_offset > value->bars[
@@ -973,154 +604,111 @@ vmmfs_pcislot_descriptor_parse(struct vmmfs_pcislot *slot,
 				return (EINVAL);
 		}
 	}
-	gap = false;
-	for (ecap = 0; ecap < VMMFS_PCISLOT_MAX_ECAPS; ++ecap) {
-		if (ecaps[ecap] == 0) {
-			gap = true;
+	return (0);
+}
+
+static int
+vmmfs_pcislot_descriptor_print(struct vmmfs_pcislot_descriptor_value *value,
+	const char *format, ...)
+{
+	va_list args;
+	size_t available = sizeof(value->text) - value->length;
+	int length;
+
+	va_start(args, format);
+	length = kvsnprintf(value->text + value->length, available, format, args);
+	va_end(args);
+	if (length < 0 || (size_t)length >= available)
+		return (E2BIG);
+	value->length += length;
+	return (0);
+}
+
+static int
+vmmfs_pcislot_descriptor_render(struct vmmfs_pcislot_descriptor_value *value)
+{
+	static const char * const types[] = { "", "io", "mem32", "mem64" };
+	static const char * const pins[] = { "none", "a", "b", "c", "d" };
+	static const char * const kinds[] = { "pcie", "msi", "msix", "blob" };
+	unsigned int index, byte;
+	int error;
+
+#define EMIT(...) do { \
+	error = vmmfs_pcislot_descriptor_print(value, __VA_ARGS__); \
+	if (error != 0) return (error); \
+} while (0)
+	EMIT("version=1\nheader.type=endpoint\nvendor_id=0x%04x\n"
+	    "device_id=0x%04x\nsubsystem_vendor_id=0x%04x\nsubsystem_device_id=0x%04x\n"
+	    "class=0x%06x\nrevision=%u\nintx.pin=%s\n", value->vendor_id,
+	    value->device_id, value->subsystem_vendor_id, value->subsystem_device_id,
+	    value->class, value->revision, pins[value->intx_pin]);
+	for (index = 0; index < VMMFS_PCISLOT_MAX_BARS; ++index) {
+		const struct vmmfs_pcislot_bar *item = &value->bars[index];
+		if (!item->present)
 			continue;
+		EMIT("bar%u.type=%s\n", index, types[item->type]);
+		EMIT("bar%u.size=0x%jx\n", index, (uintmax_t)item->size);
+		EMIT("bar%u.prefetchable=%u\n", index, item->prefetchable);
+	}
+	for (index = 0; index < VMMFS_PCISLOT_MAX_DOORBELLS; ++index) {
+		const struct vmmfs_pcislot_doorbell *item = &value->doorbells[index];
+		if (!item->present)
+			continue;
+		EMIT("doorbell%u.bar=%u\n", index, item->bar);
+		EMIT("doorbell%u.offset=0x%jx\n", index, (uintmax_t)item->offset);
+		EMIT("doorbell%u.size=0x%jx\n", index, (uintmax_t)item->size);
+		EMIT("doorbell%u.width=%u\n", index, item->width);
+		EMIT("doorbell%u.space=%s\n", index, item->space == VMMFS_PCISLOT_DOORBELL_MMIO ? "mmio" : "pio");
+	}
+	for (index = 0; index < VMMFS_PCISLOT_MAX_CONFIGS; ++index) {
+		const struct vmmfs_pcislot_config_register *item = &value->configs[index];
+		if (!item->present)
+			continue;
+		EMIT("config%u.bar=%u\n", index, item->bar);
+		EMIT("config%u.offset=0x%jx\n", index, (uintmax_t)item->offset);
+		EMIT("config%u.width=%u\n", index, item->width);
+		EMIT("config%u.space=%s\n", index, item->space == VMMFS_PCISLOT_CONFIG_MMIO ? "mmio" : "pio");
+	}
+	if (value->rom_present)
+		EMIT("rom.size=0x%jx\n", (uintmax_t)value->rom_size);
+	for (index = 0; index < VMMFS_PCISLOT_MAX_CAPS; ++index) {
+		const struct vmmfs_pcislot_cap *cap = &value->caps[index];
+		if (!cap->present)
+			break;
+		EMIT("cap%u.kind=%s\n", index, kinds[cap->kind]);
+		switch (cap->kind) {
+		case VMMFS_PCISLOT_CAP_PCIE:
+			break;
+		case VMMFS_PCISLOT_CAP_MSI:
+			EMIT("cap%u.vectors=%u\ncap%u.address_width=%u\ncap%u.maskable=%u\n",
+			    index, cap->vectors, index, cap->address_width, index, cap->maskable);
+			break;
+		case VMMFS_PCISLOT_CAP_MSIX:
+			EMIT("cap%u.vectors=%u\ncap%u.table.bar=%u\ncap%u.table.offset=0x%jx\n"
+			    "cap%u.pba.bar=%u\ncap%u.pba.offset=0x%jx\n", index, cap->vectors,
+			    index, cap->table_bar, index, (uintmax_t)cap->table_offset,
+			    index, cap->pba_bar, index, (uintmax_t)cap->pba_offset);
+			break;
+		case VMMFS_PCISLOT_CAP_BLOB:
+			EMIT("cap%u.id=0x%02x\ncap%u.access=static\ncap%u.data=", index, cap->id, index, index);
+			for (byte = 0; byte < cap->data_length; ++byte)
+				EMIT("%02x", value->cap_data[cap->data_offset + byte]);
+			EMIT("\n");
+			break;
 		}
-		if (gap || ecaps[ecap] != (VMMFS_DESCRIPTOR_ECAP_ID |
-		    VMMFS_DESCRIPTOR_ECAP_VERSION | VMMFS_DESCRIPTOR_ECAP_ACCESS |
-		    VMMFS_DESCRIPTOR_ECAP_DATA))
-			return (EINVAL);
 	}
-	bcopy(text, value->text, length);
-	value->text[length] = '\0';
-	value->length = length;
-	return (0);
-}
-
-static int
-vmmfs_pcislot_descriptor_parse_number(const char *text, size_t length,
-	uint64_t *number)
-{
-	uint64_t value;
-	unsigned int base;
-	unsigned int digit;
-	size_t index;
-
-	if (text == NULL || number == NULL || length == 0)
-		return (EINVAL);
-	base = 10;
-	index = 0;
-	if (length > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
-		base = 16;
-		index = 2;
-		if (index == length)
-			return (EINVAL);
+	for (index = 0; index < VMMFS_PCISLOT_MAX_ECAPS; ++index) {
+		const struct vmmfs_pcislot_ecap *cap = &value->ecaps[index];
+		if (!cap->present)
+			break;
+		EMIT("ecap%u.id=0x%04x\necap%u.version=%u\necap%u.access=static\necap%u.data=",
+		    index, cap->id, index, cap->version, index, index);
+		for (byte = 0; byte < cap->data_length; ++byte)
+			EMIT("%02x", value->cap_data[cap->data_offset + byte]);
+		EMIT("\n");
 	}
-	value = 0;
-	for (; index < length; ++index) {
-		if (text[index] >= '0' && text[index] <= '9')
-			digit = text[index] - '0';
-		else if (text[index] >= 'a' && text[index] <= 'f')
-			digit = text[index] - 'a' + 10;
-		else if (text[index] >= 'A' && text[index] <= 'F')
-			digit = text[index] - 'A' + 10;
-		else
-			return (EINVAL);
-		if (digit >= base || value > (UINT64_MAX - digit) / base)
-			return (ERANGE);
-		value = value * base + digit;
-	}
-	*number = value;
+#undef EMIT
 	return (0);
-}
-
-static int
-vmmfs_pcislot_descriptor_parse_boolean(const char *text, size_t length,
-	bool *boolean)
-{
-
-	if (text == NULL || boolean == NULL || length != 1 ||
-	    (text[0] != '0' && text[0] != '1'))
-		return (EINVAL);
-	*boolean = text[0] == '1';
-	return (0);
-}
-
-static int
-vmmfs_pcislot_descriptor_parse_bytes(const char *text, size_t length,
-	struct vmmfs_pcislot_descriptor_value *value, uint16_t *offset,
-	uint16_t *data_length)
-{
-	uint16_t start;
-	uint16_t count;
-	unsigned int high;
-	unsigned int low;
-	size_t index;
-
-	if (text == NULL || value == NULL || offset == NULL || data_length == NULL ||
-	    length == 0 || (length & 1) != 0 ||
-	    length / 2 > VMMFS_PCISLOT_CAP_DATA_MAX - value->cap_data_length)
-		return (EINVAL);
-	start = value->cap_data_length;
-	count = (uint16_t)(length / 2);
-	for (index = 0; index < length; index += 2) {
-		if (text[index] < '0' || text[index] > 'f' ||
-		    text[index + 1] < '0' || text[index + 1] > 'f')
-			return (EINVAL);
-		if (text[index] >= 'a' && text[index] <= 'f')
-			high = text[index] - 'a' + 10;
-		else if (text[index] >= '0' && text[index] <= '9')
-			high = text[index] - '0';
-		else
-			return (EINVAL);
-		if (text[index + 1] >= 'a' && text[index + 1] <= 'f')
-			low = text[index + 1] - 'a' + 10;
-		else if (text[index + 1] >= '0' && text[index + 1] <= '9')
-			low = text[index + 1] - '0';
-		else
-			return (EINVAL);
-		value->cap_data[start + index / 2] = (high << 4) | low;
-	}
-	*offset = start;
-	*data_length = count;
-	value->cap_data_length += count;
-	return (0);
-}
-
-static int
-vmmfs_pcislot_descriptor_index_key(const char *key, size_t length,
-	const char *prefix, const char *suffix, unsigned int maximum,
-	unsigned int *indexp)
-{
-	size_t prefix_length;
-	size_t suffix_length;
-	size_t index_length;
-	unsigned int index;
-	size_t position;
-
-	prefix_length = strlen(prefix);
-	suffix_length = strlen(suffix);
-	if (length < prefix_length || bcmp(key, prefix, prefix_length) != 0)
-		return (ENOENT);
-	if (length <= prefix_length + suffix_length + 1 ||
-	    key[length - suffix_length - 1] != '.' ||
-	    bcmp(key + length - suffix_length, suffix, suffix_length) != 0)
-		return (ENOENT);
-	index_length = length - prefix_length - suffix_length - 1;
-	if (index_length == 0 || (index_length > 1 && key[prefix_length] == '0'))
-		return (EINVAL);
-	index = 0;
-	for (position = 0; position < index_length; ++position) {
-		if (key[prefix_length + position] < '0' ||
-		    key[prefix_length + position] > '9' ||
-		    index > (UINT_MAX - (key[prefix_length + position] - '0')) / 10)
-			return (EINVAL);
-		index = index * 10 + key[prefix_length + position] - '0';
-	}
-	if (index >= maximum)
-		return (EINVAL);
-	*indexp = index;
-	return (0);
-}
-
-static bool
-vmmfs_pcislot_descriptor_key(const char *key, size_t length,
-	const char *expected)
-{
-	return (length == strlen(expected) && bcmp(key, expected, length) == 0);
 }
 
 static bool

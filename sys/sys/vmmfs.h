@@ -18,6 +18,116 @@
 #endif
 
 /*
+ * One descriptor write contains the header, followed in order by doorbell,
+ * register, capability and ext_capability arrays, then data_size bytes.
+ * Counts select array lengths; offsets are relative to that final byte array.
+ * All reserved and inapplicable fields must be zero. No pointers or packing.
+ * A zero-byte write removes the descriptor. Reads return canonical text.
+ */
+#define VMMFS_PCI_DESCRIPTOR_VERSION 1
+#define VMMFS_PCI_MAX_BARS 6
+#define VMMFS_PCI_MAX_DOORBELLS 16
+#define VMMFS_PCI_MAX_CONFIGS 64
+#define VMMFS_PCI_MAX_CAPS 32
+#define VMMFS_PCI_MAX_ECAPS 32
+#define VMMFS_PCI_MAX_DATA 4096
+#define VMMFS_PCI_DESCRIPTOR_MAX 7176
+#define VMMFS_PCI_BAR_IO 1
+#define VMMFS_PCI_BAR_MEM32 2
+#define VMMFS_PCI_BAR_MEM64 3
+#define VMMFS_PCI_CAP_PCIE 1
+#define VMMFS_PCI_CAP_MSI 2
+#define VMMFS_PCI_CAP_MSIX 3
+#define VMMFS_PCI_CAP_BLOB 4
+
+struct vmmfs_pci_bar {
+	uint64_t size;
+	uint8_t type;
+	uint8_t prefetchable;
+	uint8_t reserved[6];
+};
+
+struct vmmfs_pci_descriptor {
+	uint32_t version;
+	uint16_t vendor_id;
+	uint16_t device_id;
+	uint16_t subsystem_vendor_id;
+	uint16_t subsystem_device_id;
+	uint32_t class_code;
+	uint8_t revision;
+	uint8_t intx_pin;
+	uint16_t doorbell_count;
+	uint16_t config_count;
+	uint16_t cap_count;
+	uint16_t ecap_count;
+	uint16_t reserved;
+	uint32_t data_size;
+	uint64_t rom_size;
+	struct vmmfs_pci_bar bars[VMMFS_PCI_MAX_BARS];
+};
+
+struct vmmfs_pci_doorbell {
+	uint64_t offset;
+	uint64_t size;
+	uint8_t bar;
+	uint8_t width;
+	uint8_t space;
+	uint8_t reserved[5];
+};
+
+struct vmmfs_pci_register {
+	uint64_t offset;
+	uint8_t bar;
+	uint8_t width;
+	uint8_t space;
+	uint8_t reserved[5];
+};
+
+struct vmmfs_pci_capability {
+	uint64_t table_offset;
+	uint64_t pba_offset;
+	uint32_t data_offset;
+	uint32_t data_length;
+	uint16_t vectors;
+	uint8_t kind;
+	uint8_t address_width;
+	uint8_t maskable;
+	uint8_t table_bar;
+	uint8_t pba_bar;
+	uint8_t id;
+};
+
+struct vmmfs_pci_ext_capability {
+	uint32_t data_offset;
+	uint32_t data_length;
+	uint16_t id;
+	uint8_t version;
+	uint8_t reserved[5];
+};
+
+CTASSERT(VMMFS_PCI_DESCRIPTOR_MAX == sizeof(struct vmmfs_pci_descriptor) +
+    VMMFS_PCI_MAX_DOORBELLS * sizeof(struct vmmfs_pci_doorbell) +
+    VMMFS_PCI_MAX_CONFIGS * sizeof(struct vmmfs_pci_register) +
+    VMMFS_PCI_MAX_CAPS * sizeof(struct vmmfs_pci_capability) +
+    VMMFS_PCI_MAX_ECAPS * sizeof(struct vmmfs_pci_ext_capability) +
+    VMMFS_PCI_MAX_DATA);
+CTASSERT(sizeof(struct vmmfs_pci_bar) == 16);
+CTASSERT(sizeof(struct vmmfs_pci_descriptor) == 136);
+CTASSERT(__offsetof(struct vmmfs_pci_descriptor, data_size) == 28);
+CTASSERT(__offsetof(struct vmmfs_pci_descriptor, rom_size) == 32);
+CTASSERT(__offsetof(struct vmmfs_pci_descriptor, bars) == 40);
+CTASSERT(sizeof(struct vmmfs_pci_doorbell) == 24);
+CTASSERT(__offsetof(struct vmmfs_pci_doorbell, bar) == 16);
+CTASSERT(sizeof(struct vmmfs_pci_register) == 16);
+CTASSERT(__offsetof(struct vmmfs_pci_register, bar) == 8);
+CTASSERT(sizeof(struct vmmfs_pci_capability) == 32);
+CTASSERT(__offsetof(struct vmmfs_pci_capability, data_offset) == 16);
+CTASSERT(__offsetof(struct vmmfs_pci_capability, vectors) == 24);
+CTASSERT(__offsetof(struct vmmfs_pci_capability, kind) == 26);
+CTASSERT(sizeof(struct vmmfs_pci_ext_capability) == 16);
+CTASSERT(__offsetof(struct vmmfs_pci_ext_capability, id) == 8);
+
+/*
  * Machine events written to <machine>/events.  The event name is fixed by
  * this enum; callers may append event-specific key=value arguments.
  */
