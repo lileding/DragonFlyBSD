@@ -40,8 +40,8 @@ vmmfs_node_parent(const struct vmmfs_node *node)
 	((struct vmmfs_pcislot *)vmmfs_node_parent(&(config)->node))
 #define vmmfs_pcislot_descriptor_slot(descriptor) \
 	((struct vmmfs_pcislot *)vmmfs_node_parent(&(descriptor)->node))
-#define vmmfs_pcislot_events_slot(events) \
-	((struct vmmfs_pcislot *)vmmfs_node_parent(&(events)->node))
+#define vmmfs_pcislot_powered_slot(powered) \
+	((struct vmmfs_pcislot *)vmmfs_node_parent(&(powered)->node))
 #define vmmfs_pcislot_resource_resources(resource) \
 	((struct vmmfs_pcislot_resources *)vmmfs_node_parent(&(resource)->node))
 #define vmmfs_pcislot_resources_slot(resources) \

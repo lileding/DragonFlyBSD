@@ -81,7 +81,7 @@ struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine
 struct vmmfs_pciroot { int unused; };
 struct vmmfs_pcislot {
     struct vmmfs_node node; struct token token; struct vmmfs_pcislot_descriptor descriptor;
-    int events, config;
+    int config;
 };
 static struct vmmfs_machine machine;
 static struct vmmfs_pciroot pciroot;
@@ -91,8 +91,6 @@ static unsigned mode, allocations, revoked, notifications;
 #define M_VMMFS 0
 #define M_WAITOK 0
 #define M_ZERO 0
-#define VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED 1
-#define VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED 2
 static struct vmmfs_pcislot *vmmfs_pcislot_descriptor_slot(void *d) { (void)d; return &slot; }
 static struct vmmfs_pciroot *vmmfs_pcislot_pciroot(void *s) { (void)s; return &pciroot; }
 static struct vmmfs_machine *vmmfs_pciroot_machine(void *p) { (void)p; return &machine; }
@@ -130,10 +128,6 @@ void wakeup(void *p) {
     assert(p==&slot.descriptor && !slot.descriptor.updating);
 
 }
-static void vmmfs_pcislot_events_reset(int *events) {
-    assert(events==&slot.events); ++notifications;
-    assert(slot.descriptor.updating);
-}
 static void vmmfs_pcislot_config_descriptor_changed(int *config,
     uint64_t generation, bool committed) {
     assert(config==&slot.config && generation==8);
@@ -143,11 +137,6 @@ static void vmmfs_pcislot_config_descriptor_changed(int *config,
 static void vmmfs_pciroot_invalidate_slot(struct vmmfs_pciroot *r,
     struct vmmfs_pcislot *s) {
     assert(r==&pciroot && s==&slot); ++notifications;
-}
-static void vmmfs_pcislot_events_log(int *e, int verb, const char *format, ...) {
-    assert(e==&slot.events && format);
-    assert(verb==VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED || verb==VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED);
-    assert(slot.descriptor.updating); ++notifications;
 }
 static int
 """ + function("vmmfs_pcislot_descriptor.c", "vmmfs_pcislot_descriptor_store") + r"""
@@ -169,7 +158,7 @@ int main(void) {
             assert(revoked==0 && notifications==0 && !new_auth.valid);
         } else {
             assert(error==0 && slot.descriptor.generation==8 && revoked==1);
-            assert(!old_auth.valid && notifications==4);
+            assert(!old_auth.valid && notifications==2);
             assert(machine.machine==NULL);
             if (mode==7) assert(slot.descriptor.auth==NULL && !slot.descriptor.committed);
             else assert(slot.descriptor.auth==&new_auth && new_auth.valid &&

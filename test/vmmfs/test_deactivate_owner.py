@@ -56,7 +56,7 @@ int main(void) {
             "loader": "init", "machine": "create", "machine_id": "init",
             "memory": "init", "pciroot": "init", "pcislot": "create",
             "pcislot_config": "init", "pcislot_descriptor": "init",
-            "pcislot_events": "init", "root": "create",
+            "pcislot_powered": "init", "root": "create",
             "serialport": "create", "serialroot": "init",
             "stopped": "init", "vcpu": "init",
         }

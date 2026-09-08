@@ -54,7 +54,7 @@ and is rejected as an unknown key.
 
 Every successful nonempty write creates a new descriptor generation and
 injects one anonymous auth-token fd into the writing process.  The token
-authorizes every open of this generation's events, config, and resource nodes.  It is a
+authorizes every open of this generation's powered, config, and resource nodes.  It is a
 normal inheritable file description: fork, dup, and SCM_RIGHTS retain the
 capability, and it is neither close-on-exec nor close-on-fork.  A process
 discovers the injected token by scanning its descriptors through F_MAXFD and
@@ -301,19 +301,37 @@ Each extended capability contains:
 The data excludes the four-byte extended-capability header.  VMMFS rejects a
 set that cannot fit into 4 KiB configuration space.
 
-10. Events Log and Config Slow Path
------------------------------------
+10. Power State and Config Slow Path
+------------------------------------
 
-The events node exists for every committed descriptor.  It is a token-
-authorized, read-only, append-only text log.  Every line uses the common
-VMMFS form:
+Every slot has a persistent read-only powered node, including an empty slot.
+An open requires the current descriptor's auth token. Without a committed
+descriptor there is no token, so the node can be enumerated but not opened.
+Its contents are exactly "0\n" or "1\n". Reads use ordinary file offsets;
+use pread at offset zero (or seek before read) to obtain another snapshot.
+Writes and write-mode opens are rejected. The descriptor remains readable
+as the committed key=value text, not binary PCI configuration space.
 
-    <sequence> <host-tsc-hex> <message>
+Subscribe to powered with EVFILT_VNODE, EV_ADD | EV_CLEAR, and
+NOTE_WRITE | NOTE_REVOKE. Register before reading the initial value. VMMFS
+emits NOTE_WRITE only when the value changes. Each subscriber independently
+receives change notifications; multiple changes may coalesce. Always reread
+current state rather than count notifications. EVFILT_READ is not a power
+notification interface.
 
-VMMFS appends lifecycle observations such as descriptor replacement,
-POWER_ON, POWER_OFF, configuration timeout, and backend failure.  Events
-never carries binary requests or responses, and closing it has no device
-lifecycle effect.
+VMMFS publishes 1 only after the slot's resources and config channel are
+ready. It publishes 0 before cancelling config or revoking resources, without
+waiting for backend acknowledgement. This is kernel operation ordering, not
+a guarantee that userspace observes the notification before fd revocation.
+Cold power-off does not revoke powered; it remains open for the next start.
+Warm reset preserves its value and produces no power transition.
+
+Slot deletion closes powered and emits NOTE_REVOKE, then the common node
+deactivation revokes its fd. DragonFly fdrevoke removes associated knotes,
+so delivery of this terminal notification is not guaranteed. The fd becomes
+invalid; observe the parent namespace separately if removal must be monitored.
+Closing powered does not change device lifetime. There is no slot events log
+or PCI event enum; machine events are unchanged.
 
 The config node is a separate token-authorized, exclusive binary responder
 channel. Every committed descriptor creates exactly one config node, regardless
@@ -396,13 +414,13 @@ to recognize any of those Virtio meanings.
 Descriptor fields are stopped-state topology.  Every cold power-on creates a
 fresh powered generation: config state, BAR backing/mappings, interrupt state,
 and resource cdevs.  Every power-off first stops vCPUs, removes all VMM traps,
-emits POWER_OFF, and revokes all live resources and mappings after vCPU drain
+publishes powered=0 before revoking live resources and mappings after vCPU drain
 and bounded backend cleanup.  The stop kick wakes a vCPU parked on a config
 response; that LWKT withdraws its request and exits without completing the
-blocked fragment.  Descriptor topology and its events and config control nodes
+blocked fragment.  Descriptor topology and its powered and config control nodes
 survive power-off.
 
-Closing events has no device lifecycle effect. Closing an active config
+Closing powered has no device lifecycle effect. Closing an active config
 responder makes every configN register device-absent. A request already
 waiting for that responder completes as device-absent. Descriptor topology
 remains unchanged; guest failure is permitted and VMMFS must remain host-safe.

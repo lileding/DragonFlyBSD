@@ -25,7 +25,6 @@
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_descriptor.h"
-#include "vmmfs_pcislot_events.h"
 
 #define VMMFS_PCISLOT_DESCRIPTOR_MODE 0644
 
@@ -303,19 +302,10 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&slot->token);
 	vmmfs_pcislot_auth_revoke(old_auth);
-	vmmfs_pcislot_events_reset(&slot->events);
 	vmmfs_pcislot_config_descriptor_changed(&slot->config, generation,
 	    committed);
 	vmmfs_pciroot_invalidate_slot(pciroot, slot);
-	if (removing) {
-		vmmfs_pcislot_events_log(&slot->events,
-		    VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED, "generation=%ju",
-		    (uintmax_t)generation);
-	} else {
-		vmmfs_pcislot_events_log(&slot->events,
-		    VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED, "generation=%ju",
-		    (uintmax_t)generation);
-	}
+
 	error = 0;
 	goto finished;
 

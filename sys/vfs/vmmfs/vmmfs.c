@@ -27,7 +27,7 @@
 #include "vmmfs_pcislot_config.h"
 #include "vmmfs_pcislot_descriptor.h"
 #include "vmmfs_pcislot_resource.h"
-#include "vmmfs_pcislot_events.h"
+#include "vmmfs_pcislot_powered.h"
 #include "vmmfs_serialport.h"
 #include "vmmfs_serialroot.h"
 
@@ -38,7 +38,7 @@ extern struct vop_ops vmmfs_serialport_vops;
 extern struct vop_ops vmmfs_pcislot_descriptor_vops;
 extern struct vop_ops vmmfs_pcislot_config_vops;
 extern struct vop_ops vmmfs_pcislot_resource_vops;
-extern struct vop_ops vmmfs_pcislot_events_vops;
+extern struct vop_ops vmmfs_pcislot_powered_vops;
 
 #include "vmmfs_launch.h"
 
@@ -183,13 +183,13 @@ vmmfs_mount(struct mount *mount, char *path, caddr_t data,
 	    &state->pcislot_config_vops);
 	vfs_add_vnodeops(mount, &vmmfs_pcislot_resource_vops,
 	    &state->pcislot_resource_vops);
-	vfs_add_vnodeops(mount, &vmmfs_pcislot_events_vops,
-	    &state->pcislot_events_vops);
+	vfs_add_vnodeops(mount, &vmmfs_pcislot_powered_vops,
+	    &state->pcislot_powered_vops);
 	error = vmmfs_root_create(mount, &root);
 	if (error != 0) {
 		vfs_rm_vnodeops(mount, NULL, &state->launch_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->boot_vops);
-		vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
+		vfs_rm_vnodeops(mount, NULL, &state->pcislot_powered_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 		vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);
@@ -240,7 +240,7 @@ vmmfs_unmount(struct mount *mount, int flags)
 		return (error);
 	}
 	state->root = NULL;
-	vfs_rm_vnodeops(mount, NULL, &state->pcislot_events_vops);
+	vfs_rm_vnodeops(mount, NULL, &state->pcislot_powered_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_resource_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_config_vops);
 	vfs_rm_vnodeops(mount, NULL, &state->pcislot_descriptor_vops);

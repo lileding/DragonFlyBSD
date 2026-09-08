@@ -15,7 +15,7 @@ ANCESTORS = {
     "vmmfs_events_machine", "vmmfs_loader_machine",
     "vmmfs_machine_id_machine", "vmmfs_memory_machine",
     "vmmfs_vcpu_machine", "vmmfs_pcislot_config_slot",
-    "vmmfs_pcislot_descriptor_slot", "vmmfs_pcislot_events_slot",
+    "vmmfs_pcislot_descriptor_slot", "vmmfs_pcislot_powered_slot",
     "vmmfs_pcislot_resource_resources", "vmmfs_pcislot_resources_slot",
 }
 

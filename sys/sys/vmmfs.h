@@ -51,17 +51,13 @@ enum vmmfs_machine_event {
 };
 
 /*
- * PCI slot events written to <machine>/pci/<slot>/events.  The event name is
- * fixed by this enum; callers may append event-specific key=value arguments.
+ * <machine>/pci/<slot>/powered is a read-only "0\n" or "1\n" attribute.
+ * Observe EVFILT_VNODE with NOTE_WRITE | NOTE_REVOKE and EV_CLEAR, then
+ * pread at offset zero to obtain current state. Notifications may coalesce.
+ * Register before reading the initial state. Revocation of powered means
+ * slot removal, not a cold power-off. fdrevoke removes knotes, so terminal
+ * notification delivery is not guaranteed. Resource files retain their own lifetime.
  */
-enum vmmfs_pci_event {
-	VMMFS_PCI_EVENT_SLOT_CREATED = 1,
-	VMMFS_PCI_EVENT_DESCRIPTOR_COMMITTED,
-	VMMFS_PCI_EVENT_DESCRIPTOR_REMOVED,
-	VMMFS_PCI_EVENT_POWER_ON,
-	VMMFS_PCI_EVENT_POWER_OFF,
-	VMMFS_PCI_EVENT_RESET,
-};
 
 /*
  * The latest pending guest doorbell write.  The named kickN node determines

@@ -55,7 +55,7 @@ struct vmmfs_node { struct vnode *vnode; struct vmmfs_node *parent; struct token
     int (*get_item)(struct vmmfs_node *, const char *, size_t, struct vnode **);  struct lock lock;};
 struct vmmfs_machine { struct vmmfs_node node; struct token token; void *machine;  };
 struct vmmfs_pcislot { struct vmmfs_node node; struct token token; unsigned bdf;  void *entry;
-    struct { struct vmmfs_node node; } descriptor, config, events; };
+    struct { struct vmmfs_node node; } descriptor, config, powered; };
 struct vmmfs_pciroot_slot { struct vnode *vnode; struct vmmfs_pcislot *slot; };
 struct registry { struct vmmfs_pciroot_slot *slots; };
 struct vmmfs_pciroot { struct vmmfs_node node; struct token token; struct registry *registry; };
@@ -107,7 +107,7 @@ static bool
 int main(void) {
     slot.node.parent = &root.node; slot.node.vnode = &vnode; slot.bdf = 8;
     slot.token.held = 1; slot.node.dead = true;
-    slot.descriptor.node.vnode = slot.config.node.vnode = slot.events.node.vnode = &child;
+    slot.descriptor.node.vnode = slot.config.node.vnode = slot.powered.node.vnode = &child;
     root.registry = &registry;
     registered = true; slot.entry = &slot; machine.machine = &machine;
     assert(vmmfs_pcislot_deactivate(&slot.node) == false);

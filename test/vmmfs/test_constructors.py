@@ -14,7 +14,6 @@ HARNESS = COMMON + r"""
 #define VMMFS_PCISLOT_MODE 0755
 #define VMMFS_MACHINE_EVENT_CREATED 0
 #define VMMFS_MACHINE_EVENT_STOPPED 1
-#define VMMFS_PCI_EVENT_SLOT_CREATED 2
 #define bcopy(s,d,n) memcpy((d),(s),(n))
 struct vmmfs_node_item;
 struct token { bool initialized; unsigned held; };
@@ -48,7 +47,7 @@ struct vmmfs_pciroot { struct vmmfs_node node; struct token token; };
 struct vmmfs_pcislot {
     struct vmmfs_node node; struct token token; unsigned bdf; void *entry, *resources;
 
-    struct child descriptor, config, events;
+    struct child descriptor, config, powered;
     struct vnode *descriptor_vnode, *config_vnode, *events_vnode;
 };
 static unsigned stage, fail_at, objects, vnodes, child_live, token_live;
@@ -102,11 +101,10 @@ static int child_init(struct vmmfs_node *p,
 #define vmmfs_pciroot_init child_init
 #define vmmfs_serialroot_init child_init
 #define vmmfs_events_init child_init
-#define vmmfs_pcislot_events_init child_init
+#define vmmfs_pcislot_powered_init child_init
 #define vmmfs_pcislot_config_init child_init
 #define vmmfs_pcislot_descriptor_init child_init
 #define vmmfs_events_log(...) ((void)0)
-#define vmmfs_pcislot_events_log(...) ((void)0)
 static void vmmfs_vnode_discard(struct vnode *v) {
     if (!v) return;
     /* Detached unpublished vnode no longer owns v_data; caller puts the node. */

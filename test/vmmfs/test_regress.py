@@ -644,7 +644,7 @@ struct vmmfs_pcislot {
     struct vmmfs_node node; struct token token;
     struct descriptor descriptor;
     struct vmmfs_pcislot_resources *resources;
-    struct child config, events;
+    struct child config, powered;
     struct vnode *descriptor_vnode, *events_vnode, *config_vnode;
 };
 struct vmmfs_node_item { ino_t inode; int type; char name[32]; };
@@ -720,9 +720,9 @@ int main(void) {
     assert(found == &bar && bar.holds == 1); vrele(found);
     assert(vmmfs_node_nresolve(&args) == 0 && cached == 1);
     assert(bar.holds == 0 && resources.node.references == 1);
-    assert(vmmfs_pcislot_read_item(&slot.node, 0, &item) == 0);
-    assert(strcmp(item.name, "descriptor") == 0);
     assert(vmmfs_pcislot_read_item(&slot.node, 1, &item) == 0);
+    assert(strcmp(item.name, "descriptor") == 0);
+    assert(vmmfs_pcislot_read_item(&slot.node, 2, &item) == 0);
     assert(item.inode == 42 && strcmp(item.name, "bar0") == 0);
 
     /* Detachment between parent and child locks cannot free the collection. */
@@ -730,12 +730,12 @@ int main(void) {
     assert(vmmfs_node_nresolve(&args) == ENOENT && cached == 0);
     assert(resources.node.references == 0 && bar.holds == 0);
     assert(vmmfs_node_nresolve(&args) == ENOENT);
-    assert(vmmfs_pcislot_read_item(&slot.node, 1, &item) == ENOENT);
+    assert(vmmfs_pcislot_read_item(&slot.node, 2, &item) == ENOENT);
 
     resources.node.references = 1; resources.destroying = false;
     resources.items[0].node.vnode = &bar; slot.resources = &resources;
     retire_on_unlock = true;
-    assert(vmmfs_pcislot_read_item(&slot.node, 1, &item) == ENOENT);
+    assert(vmmfs_pcislot_read_item(&slot.node, 2, &item) == ENOENT);
     assert(resources.node.references == 0);
     slot.descriptor.node.vnode = &bar; name.nc_name = "descriptor"; name.nc_nlen = 10;
     assert(vmmfs_node_nresolve(&args) == 0 && bar.holds == 0);
@@ -1340,7 +1340,6 @@ int main(void) {
     def test_reset_synchronizes_resource_addresses(self):
         run_c(COMMON + """
 #define VMMFS_PCISLOT_MAX_BARS 6
-#define VMMFS_PCI_EVENT_RESET 0
 struct vmmfs_pcislot_resources { uint64_t bars[6], rom; };
 struct vmmfs_pcislot {
     struct { bool dead; } node;
@@ -1355,7 +1354,6 @@ struct vmmfs_pcislot {
 };
 #define vmmfs_pcislot_pciroot(s) (s)
 #define vmmfs_pcislot_config_power_on(c, g) ((void)(c), (void)(g))
-#define vmmfs_pcislot_events_log(...) ((void)0)
 static int vmmfs_pcislot_resources_set_decode(
     struct vmmfs_pcislot_resources *r, bool a, bool b, bool c) {
     (void)r; (void)a; (void)b; (void)c; return 0;
@@ -1664,7 +1662,7 @@ int main(void) {
 
 
     def test_stream_shutdown_is_owned_by_deactivate(self):
-        objects = ("vmmfs_events", "vmmfs_pcislot_events", "vmmfs_pcislot_config")
+        objects = ("vmmfs_events", "vmmfs_pcislot_config")
         for name in objects:
             header = (SOURCE / (name + ".h")).read_text()
             self.assertNotIn(name + "_revoke", header)
@@ -1713,20 +1711,18 @@ static void vmmfs_pcislot_config_cancel_locked(struct vmmfs_pcislot_config *c,
 } while (0)
 int main(void) {
     struct vmmfs_events events = {0};
-    struct vmmfs_pcislot_events pci_events = {0};
     struct vmmfs_pcislot_config config = {0};
     config.powered = config.opening = true; config.responder = &config;
     CHECK(events, vmmfs_events_deactivate);
-    CHECK(pci_events, vmmfs_pcislot_events_deactivate);
     CHECK(config, vmmfs_pcislot_config_deactivate);
-    assert(wakes == 3 && notes == 3 && cancellations == 1);
+    assert(wakes == 2 && notes == 2 && cancellations == 1);
 }
 """)
 
     def test_stream_vop_admission_uses_work_dispatch(self):
-        for object_name in ("config", "events"):
+        for object_name in ("config", "powered"):
             filename = "vmmfs_pcislot_" + object_name + ".c"
-            for verb in ("open", "kqfilter", "read"):
+            for verb in (("open", "kqfilter") if object_name == "powered" else ("open", "kqfilter", "read")):
                 body = function(filename, "vmmfs_pcislot_" + object_name + "_" + verb)
                 self.assertIn("VMMFS_WORK(", body)
                 self.assertNotIn("->node.dead", body)

@@ -16,7 +16,7 @@
 #include "vmmfs_pcislot_descriptor.h"
 #include "vmmfs_pcislot_auth.h"
 #include "vmmfs_pcislot_config.h"
-#include "vmmfs_pcislot_events.h"
+#include "vmmfs_pcislot_powered.h"
 
 struct vmmfs_mount;
 struct vmmfs_pcislot_resources;
@@ -46,7 +46,7 @@ struct vmmfs_pcislot {
 	/* Owned until registry detach; protected by the machine token. */
 	struct vmmfs_pcislot_descriptor descriptor;
 	struct vmmfs_pcislot_config config;
-	struct vmmfs_pcislot_events events;
+	struct vmmfs_pcislot_powered powered;
 	struct vmmfs_pcislot_type0 type0;
 	/* Current powered generation; protected by the slot token. */
 	struct vmmfs_pcislot_resources *resources;

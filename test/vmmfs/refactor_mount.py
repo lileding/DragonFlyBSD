@@ -17,7 +17,7 @@ TARGETS = {
         "boot_init", "events_init", "launch_create", "loader_init",
         "machine_create", "machine_id_init", "memory_init", "pciroot_init",
         "pcislot_create", "pcislot_config_init", "pcislot_descriptor_init",
-        "pcislot_events_init", "serialport_create", "serialroot_init",
+        "pcislot_powered_init", "serialport_create", "serialroot_init",
         "stopped_create", "vcpu_init",
     )
 }

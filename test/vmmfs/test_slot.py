@@ -37,7 +37,7 @@ struct vmmfs_pcislot {
     struct vmmfs_pcislot_resources *resources;
     struct { unsigned state; } type0;
     bool config_powered;
-    int config;
+    int config; bool powered;
 };
 static struct vmmfs_pcislot slot;
 static struct vmmfs_pcislot_resources resources;
@@ -57,8 +57,12 @@ static void vmmfs_pciroot_invalidate_slot(struct vmmfs_pcislot *root,
     assert(root == &slot && s == &slot && !s->token.held);
     ++notifications;
 }
+static void vmmfs_pcislot_powered_set(bool *p, bool value) {
+    assert(p == &slot.powered && !value && !slot.token.held);
+    *p = value;
+}
 static void vmmfs_pcislot_config_power_off(int *c) {
-    assert(c == &slot.config && !slot.token.held);
+    assert(c == &slot.config && !slot.token.held && !slot.powered);
     slot.config_powered = false;
 }
 static void vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *r) {

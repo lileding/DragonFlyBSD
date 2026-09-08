@@ -36,7 +36,6 @@
 #include "vmmfs_memory.h"
 #include "vmmfs_pcislot.h"
 #include "vmmfs_pcislot_auth.h"
-#include "vmmfs_pcislot_events.h"
 #include "vmmfs_node.h"
 #include "vmmfs_pcislot_resource.h"
 #include "vmmfs_vcpu.h"
@@ -384,8 +383,6 @@ vmmfs_pcislot_resources_create(struct vmmfs_pcislot *slot,
 		resource->node.deactivate = vmmfs_pcislot_resource_deactivate;
 	}
 	*resourcesp = resources;
-	vmmfs_pcislot_events_log(&slot->events, VMMFS_PCI_EVENT_POWER_ON,
-	    "generation=%ju resources=%zu", (uintmax_t)generation, count);
 	return (0);
 
 fail:
@@ -436,11 +433,7 @@ vmmfs_pcislot_resources_deactivate(struct vmmfs_pcislot_resources *resources)
 			vmmfs_node_put(&resource->node);
 		}
 	}
-	if (vmmfs_pcislot_resources_slot(resources) != NULL) {
-		vmmfs_pcislot_events_log(&vmmfs_pcislot_resources_slot(resources)->events,
-		    VMMFS_PCI_EVENT_POWER_OFF, "generation=%ju",
-		    (uintmax_t)resources->descriptor_generation);
-	}
+
 	lwkt_gettoken(&resources->token);
 	resources->machine = NULL;
 	lwkt_reltoken(&resources->token);
