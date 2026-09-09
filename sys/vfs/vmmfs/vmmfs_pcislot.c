@@ -146,7 +146,7 @@ vmmfs_pcislot_deactivate(struct vmmfs_node *node)
 		lwkt_reltoken(&machine->token);
 		lwkt_reltoken(&parent->token);
 		if (error != 0)
-			return (error == 0);
+			return (false);
 	} else {
 		lwkt_reltoken(&parent->token);
 	}

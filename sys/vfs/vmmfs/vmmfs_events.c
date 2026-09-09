@@ -123,9 +123,6 @@ vmmfs_events_drop(struct vmmfs_node *node)
 	lwkt_token_uninit(&events->token);
 }
 
-
-
-
 void
 vmmfs_events_log(struct vmmfs_events *events, enum vmmfs_machine_event event,
 	const char *args, ...)
@@ -209,8 +206,6 @@ vmmfs_machine_event_name(enum vmmfs_machine_event event)
 	switch (event) {
 	case VMMFS_MACHINE_EVENT_CREATED:
 		return ("machine created");
-	case VMMFS_MACHINE_EVENT_DESTROY_REFUSED:
-		return ("machine destroy refused");
 	case VMMFS_MACHINE_EVENT_STOP_REQUESTED:
 		return ("machine stop requested");
 	case VMMFS_MACHINE_EVENT_STOPPED:
@@ -223,32 +218,12 @@ vmmfs_machine_event_name(enum vmmfs_machine_event event)
 		return ("machine reset completed");
 	case VMMFS_MACHINE_EVENT_RESET_FAILED:
 		return ("machine reset failed");
-	case VMMFS_MACHINE_EVENT_START_REQUESTED:
-		return ("machine start requested");
-	case VMMFS_MACHINE_EVENT_START_COMPLETED:
-		return ("machine start completed");
-	case VMMFS_MACHINE_EVENT_START_FAILED:
-		return ("machine start failed");
-	case VMMFS_MACHINE_EVENT_BOOT_REQUESTED:
-		return ("machine boot requested");
-	case VMMFS_MACHINE_EVENT_BOOT_READY:
-		return ("machine boot ready");
 	case VMMFS_MACHINE_EVENT_BOOT_COMPLETED:
 		return ("machine boot completed");
 	case VMMFS_MACHINE_EVENT_BOOT_FAILED:
 		return ("machine boot failed");
-	case VMMFS_MACHINE_EVENT_LOADER_SUBMITTED_CPUSTATE:
-		return ("machine loader submitted cpustate");
-	case VMMFS_MACHINE_EVENT_LOADER_FAILED:
-		return ("machine loader failed");
 	case VMMFS_MACHINE_EVENT_SERIAL_CREATE_FAILED:
 		return ("machine serial create failed");
-	case VMMFS_MACHINE_EVENT_PCI_CREATE_FAILED:
-		return ("machine pci create failed");
-	case VMMFS_MACHINE_EVENT_GUEST_STOP_REQUEST_FAILED:
-		return ("machine guest stop request failed");
-	case VMMFS_MACHINE_EVENT_GUEST_RESET_REQUEST_FAILED:
-		return ("machine guest reset request failed");
 	case VMMFS_MACHINE_EVENT_VCPU_INJECT_GP_FAILED:
 		return ("machine vcpu inject-gp failed");
 	case VMMFS_MACHINE_EVENT_VCPU_HALTED:
@@ -378,7 +353,6 @@ vmmfs_events_filter_detach(struct knote *knote)
 	knote_remove(&events->kq.ki_note, knote);
 	lwkt_reltoken(&events->token);
 }
-
 
 static int
 vmmfs_events_store(struct vmmfs_node *node, const char *buffer,

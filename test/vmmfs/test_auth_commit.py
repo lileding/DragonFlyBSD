@@ -87,8 +87,8 @@ static void fsetfd(struct filedesc *table,struct file *file,int fd) {
     } else ++cancellations;
 }
 static void wakeup(void *p) { assert(p==&slot.descriptor && !slot.descriptor.updating); }
-static void vmmfs_pcislot_config_descriptor_changed(int *c,uint64_t generation,bool committed) {
-    assert(c==&slot.config && generation==8 && committed==slot.descriptor.committed);
+static void vmmfs_pcislot_config_descriptor_changed(int *c,uint64_t generation) {
+    assert(c==&slot.config && generation==8);
     ++notifications;
 }
 static void vmmfs_pciroot_invalidate_slot(void *p,void *s) { assert(p==&pciroot && s==&slot); ++notifications; }

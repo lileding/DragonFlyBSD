@@ -188,7 +188,6 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	uint64_t generation;
 	bool removing;
 	bool updating;
-	bool committed;
 	int error;
 	descriptor = (struct vmmfs_pcislot_descriptor *)node;
 	if (descriptor == NULL)
@@ -253,15 +252,13 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 		descriptor->node.size = (off_t)descriptor->value.length;
 	}
 	descriptor->generation = generation;
-	committed = !removing;
 	/* Publication cannot fail; until now the reserved fd had no file. */
 	if (file != NULL)
 		fsetfd(curproc->p_fd, file, fd);
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&slot->token);
 	vmmfs_pcislot_auth_revoke(old_auth);
-	vmmfs_pcislot_config_descriptor_changed(&slot->config, generation,
-	    committed);
+	vmmfs_pcislot_config_descriptor_changed(&slot->config, generation);
 	vmmfs_pciroot_invalidate_slot(pciroot, slot);
 
 	error = 0;

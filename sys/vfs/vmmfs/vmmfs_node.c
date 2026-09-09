@@ -28,8 +28,6 @@ vmmfs_node_hold(struct vmmfs_node *node)
 	atomic_add_int(&node->references, 1);
 }
 
-
-
 off_t
 vmmfs_node_decimal_size(uint64_t value)
 {
@@ -265,8 +263,6 @@ vmmfs_node_put(struct vmmfs_node *node)
 		vmmfs_node_put(parent);
 }
 
-
-
 static int
 vmmfs_node_get_vnode(struct vmmfs_node *node, struct vnode **vnodep)
 {
@@ -349,8 +345,6 @@ vmmfs_vnode_create_cdev(struct mount *mount, struct vop_ops **vops,
 	return (0);
 }
 
-
-
 bool
 vmmfs_node_deactivate(struct vmmfs_node *node)
 {
@@ -380,8 +374,6 @@ vmmfs_node_deactivate(struct vmmfs_node *node)
 	vrele(vnode);
 	return (true);
 }
-
-
 
 int
 vmmfs_node_reclaim(struct vop_reclaim_args *ap)

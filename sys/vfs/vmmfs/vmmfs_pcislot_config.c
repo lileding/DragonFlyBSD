@@ -157,11 +157,9 @@ vmmfs_pcislot_config_drop(struct vmmfs_node *node)
 
 }
 
-
-
 void
 vmmfs_pcislot_config_descriptor_changed(struct vmmfs_pcislot_config *config,
-	uint64_t generation, bool present)
+	uint64_t generation)
 {
 	if (config == NULL)
 		return;
@@ -174,7 +172,6 @@ vmmfs_pcislot_config_descriptor_changed(struct vmmfs_pcislot_config *config,
 	lwkt_reltoken(&config->token);
 	wakeup(config);
 	KNOTE(&config->kq.ki_note, 0);
-	(void)present;
 }
 
 void
@@ -515,7 +512,6 @@ vmmfs_pcislot_config_read(struct vop_read_args *ap)
 		vmmfs_pcislot_config_redeliver(config, ap->a_fp, &record);
 	return (error);
 }
-
 
 static int
 vmmfs_pcislot_config_respond(struct vmmfs_pcislot_config *config,

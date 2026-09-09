@@ -46,8 +46,6 @@ struct vop_ops vmmfs_stopped_vops = {
 	.vop_write = vmmfs_node_write,
 };
 
-
-
 static int
 vmmfs_stopped_setattr(struct vop_setattr_args *ap)
 {
