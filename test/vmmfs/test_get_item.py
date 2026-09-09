@@ -1,9 +1,13 @@
 """Persistent stopped node and fixed-node lock scope."""
 import unittest
 from test_regress import function, run_c
+from pathlib import Path
+import re
 
 class GetItem(unittest.TestCase):
     def test_token_scope_and_handoff(self):
+        source = (Path(__file__).resolve().parents[2]/"sys/vfs/vmmfs/vmmfs_machine.c").read_text()
+        table = re.search(r"static const struct \{.*?\} vmmfs_machine_items\[\] = \{.*?\n\};", source, re.S).group(0)
         run_c(r'''
 #include <assert.h>
 #include <errno.h>
@@ -27,12 +31,20 @@ struct vmmfs_machine {
 };
 struct vmmfs_node_item { char name[256]; unsigned inode; uint8_t type; };
 #define bcopy(s,d,n) memcpy((d),(s),(n))
+#define NELEM(a) (sizeof(a)/sizeof((a)[0]))
+''' + table + r'''
 static struct vmmfs_machine m;
 static struct thread bsp;
 static unsigned held, locks;
 static void lwkt_gettoken(int *t) { assert(!*t); *t=1; ++held; ++locks; }
 static void lwkt_reltoken(int *t) { assert(*t && held); *t=0; --held; }
 static void vref(struct vnode *v) { assert(!held); ++v->holds; }
+static bool vmmfs_vcpu_is_stopped(struct child *c) {
+    lwkt_gettoken(&c->token);
+    bool stopped = c->threads == NULL || c->threads[0].vcpu == NULL;
+    lwkt_reltoken(&c->token);
+    return stopped;
+}
 static int
 ''' + function('vmmfs_machine.c', 'vmmfs_machine_get_item') + r'''
 static int
@@ -51,7 +63,14 @@ int main(void) {
         assert(v==&fixed && !locks);
         assert(!vmmfs_machine_read_item(&m.node,i<6?i:i+1,&item));
         assert(item.inode==i+10 && !locks);
+        assert(!strcmp(item.name,names[i]));
+        assert(item.type==(i==4?DT_CHR:i>=6?DT_DIR:DT_REG));
     }
+    assert(vmmfs_machine_get_item(&m.node,"vc",2,&v)==ENOENT);
+    assert(vmmfs_machine_get_item(&m.node,"vcpuX",5,&v)==ENOENT);
+    assert(vmmfs_machine_get_item(&m.node,"",0,&v)==ENOENT);
+    assert(vmmfs_machine_read_item(&m.node,9,&item)==ENOENT);
+    assert(vmmfs_machine_read_item(&m.node,UINT64_MAX,&item)==ENOENT);
     for (unsigned runtime=0;runtime<2;++runtime)
     for (unsigned ready=0;ready<2;++ready)
     for (unsigned workers=0;workers<2;++workers)

@@ -37,6 +37,32 @@
 
 #define VMMFS_MACHINE_MODE 0555
 
+static const struct {
+    const char *name;
+    size_t length;
+    size_t offset;
+    uint8_t type;
+} vmmfs_machine_items[] = {
+	{ "id", sizeof("id") - 1,
+	    __offsetof(struct vmmfs_machine, id_node.node), DT_REG },
+	{ "vcpu", sizeof("vcpu") - 1,
+	    __offsetof(struct vmmfs_machine, vcpu.node), DT_REG },
+	{ "mem", sizeof("mem") - 1,
+	    __offsetof(struct vmmfs_machine, memory.node), DT_REG },
+	{ "loader", sizeof("loader") - 1,
+	    __offsetof(struct vmmfs_machine, loader.node), DT_REG },
+	{ "boot", sizeof("boot") - 1,
+	    __offsetof(struct vmmfs_machine, boot.node), DT_CHR },
+	{ "events", sizeof("events") - 1,
+	    __offsetof(struct vmmfs_machine, events.node), DT_REG },
+	{ "stopped", sizeof("stopped") - 1,
+	    __offsetof(struct vmmfs_machine, stopped.node), DT_REG },
+	{ "pci", sizeof("pci") - 1,
+	    __offsetof(struct vmmfs_machine, pciroot.node), DT_DIR },
+	{ "serial", sizeof("serial") - 1,
+	    __offsetof(struct vmmfs_machine, serialroot.node), DT_DIR },
+};
+
 static int vmmfs_machine_create_item(struct vmmfs_node *, const char *,
 	size_t, struct vnode **);
 static int vmmfs_machine_remove_item(struct vmmfs_node *, const char *,
@@ -206,49 +232,27 @@ vmmfs_machine_create_item(struct vmmfs_node *node, const char *name,
 }
 
 static int
-vmmfs_machine_get_item(struct vmmfs_node *node,
-					   const char *name, size_t length, struct vnode **vnodep)
+vmmfs_machine_get_item(struct vmmfs_node *node, const char *name,
+	size_t length, struct vnode **vnodep)
 {
 	struct vmmfs_machine *machine = (struct vmmfs_machine *)node;
-	struct vnode *vnode;
-	bool visible;
+	struct vmmfs_node *child;
+	size_t index;
 
-	if (length == sizeof("id") - 1 &&
-		bcmp(name, "id", sizeof("id") - 1) == 0)
-		vnode = machine->id_node.node.vnode;
-	else if (length == sizeof("vcpu") - 1 &&
-			bcmp(name, "vcpu", sizeof("vcpu") - 1) == 0)
-		vnode = machine->vcpu.node.vnode;
-	else if (length == sizeof("mem") - 1 &&
-			bcmp(name, "mem", sizeof("mem") - 1) == 0)
-		vnode = machine->memory.node.vnode;
-	else if (length == sizeof("loader") - 1 &&
-			bcmp(name, "loader", sizeof("loader") - 1) == 0)
-		vnode = machine->loader.node.vnode;
-	else if (length == sizeof("boot") - 1 &&
-			bcmp(name, "boot", sizeof("boot") - 1) == 0)
-		vnode = machine->boot.node.vnode;
-	else if (length == sizeof("events") - 1 &&
-			bcmp(name, "events", sizeof("events") - 1) == 0)
-		vnode = machine->events.node.vnode;
-	else if (length == sizeof("pci") - 1 &&
-			bcmp(name, "pci", sizeof("pci") - 1) == 0)
-		vnode = machine->pciroot.node.vnode;
-	else if (length == sizeof("serial") - 1 &&
-			bcmp(name, "serial", sizeof("serial") - 1) == 0)
-		vnode = machine->serialroot.node.vnode;
-	else if (length == sizeof("stopped") - 1 &&
-	    bcmp(name, "stopped", sizeof("stopped") - 1) == 0) {
-		visible = vmmfs_vcpu_is_stopped(&machine->vcpu);
-		if (!visible)
+	for (index = 0; index < NELEM(vmmfs_machine_items); ++index) {
+		if (length != vmmfs_machine_items[index].length ||
+			bcmp(name, vmmfs_machine_items[index].name, length) != 0)
+			continue;
+		child = (struct vmmfs_node *)((char *)machine +
+			vmmfs_machine_items[index].offset);
+		if (child == &machine->stopped.node &&
+			!vmmfs_vcpu_is_stopped(&machine->vcpu))
 			return (ENOENT);
-		vnode = machine->stopped.node.vnode;
-	} else {
-		return (ENOENT);
+		vref(child->vnode);
+		*vnodep = child->vnode;
+		return (0);
 	}
-	vref(vnode);
-	*vnodep = vnode;
-	return (0);
+	return (ENOENT);
 }
 
 static int
@@ -279,62 +283,23 @@ vmmfs_machine_remove_item(struct vmmfs_node *node, const char *name,
 
 static int
 vmmfs_machine_read_item(struct vmmfs_node *node, uint64_t index,
-						struct vmmfs_node_item *item)
+	struct vmmfs_node_item *item)
 {
 	struct vmmfs_machine *machine = (struct vmmfs_machine *)node;
+	struct vmmfs_node *child;
 
 	item->name[0] = '\0';
-	switch (index) {
-		case 0:
-			item->inode = machine->id_node.node.inode;
-			bcopy("id", item->name, sizeof("id"));
-			item->type = DT_REG;
-			break;
-		case 1:
-			item->inode = machine->vcpu.node.inode;
-			bcopy("vcpu", item->name, sizeof("vcpu"));
-			item->type = DT_REG;
-			break;
-		case 2:
-			item->inode = machine->memory.node.inode;
-			bcopy("mem", item->name, sizeof("mem"));
-			item->type = DT_REG;
-			break;
-		case 3:
-			item->inode = machine->loader.node.inode;
-			bcopy("loader", item->name, sizeof("loader"));
-			item->type = DT_REG;
-			break;
-		case 4:
-			item->inode = machine->boot.node.inode;
-			bcopy("boot", item->name, sizeof("boot"));
-			item->type = DT_CHR;
-			break;
-		case 5:
-			item->inode = machine->events.node.inode;
-			bcopy("events", item->name, sizeof("events"));
-			item->type = DT_REG;
-			break;
-		case 6:
-			if (vmmfs_vcpu_is_stopped(&machine->vcpu)) {
-				item->inode = machine->stopped.node.inode;
-				bcopy("stopped", item->name, sizeof("stopped"));
-				item->type = DT_REG;
-			}
-			break;
-		case 7:
-			item->inode = machine->pciroot.node.inode;
-			bcopy("pci", item->name, sizeof("pci"));
-			item->type = DT_DIR;
-			break;
-		case 8:
-			item->inode = machine->serialroot.node.inode;
-			bcopy("serial", item->name, sizeof("serial"));
-			item->type = DT_DIR;
-			break;
-		default:
-			return (ENOENT);
-	}
+	if (index >= NELEM(vmmfs_machine_items))
+		return (ENOENT);
+	child = (struct vmmfs_node *)((char *)machine +
+		vmmfs_machine_items[index].offset);
+	if (child == &machine->stopped.node &&
+		!vmmfs_vcpu_is_stopped(&machine->vcpu))
+		return (0);
+	item->inode = child->inode;
+	item->type = vmmfs_machine_items[index].type;
+	bcopy(vmmfs_machine_items[index].name, item->name,
+		vmmfs_machine_items[index].length + 1);
 	return (0);
 }
 
