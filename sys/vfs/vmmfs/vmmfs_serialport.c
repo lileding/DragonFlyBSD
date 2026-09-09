@@ -348,10 +348,16 @@ vmmfs_serialport_stop(struct vmmfs_serialport *port)
     vmm_machine_t machine;
     vmm_io_t read_io;
     vmm_io_t write_io;
+    int error;
 
     if (port == NULL)
         return EINVAL;
     lwkt_gettoken(&port->token);
+    while (port->stopping) {
+        error = tsleep(port, 0, "vmmserstop", 0);
+        if (error != 0)
+            kprintf("vmmfs: serial stop wait: %d\n", error);
+    }
     if (port->machine == NULL) {
         lwkt_reltoken(&port->token);
         return 0;
@@ -363,14 +369,32 @@ vmmfs_serialport_stop(struct vmmfs_serialport *port)
     port->read_io = NULL;
     port->write_io = NULL;
     port->machine = NULL;
+    /* No new IRQ owner can acquire this runtime after the detach. */
+    while (port->irq_busy) {
+        error = tsleep(port, 0, "vmmserirq", 0);
+        if (error != 0)
+            kprintf("vmmfs: serial IRQ drain: %d\n", error);
+    }
+    lwkt_reltoken(&port->token);
+    error = vmm_machine_set_irq(machine, port->gsi, false);
+    if (error != 0)
+        kprintf("vmmfs: serial IRQ lower: %d\n", error);
+    /* Untrap releases its handle even when semantic teardown reports an error. */
+    if (read_io != NULL) {
+        error = vmm_machine_untrap(machine, read_io);
+        if (error != 0)
+            kprintf("vmmfs: serial read untrap: %d\n", error);
+    }
+    if (write_io != NULL) {
+        error = vmm_machine_untrap(machine, write_io);
+        if (error != 0)
+            kprintf("vmmfs: serial write untrap: %d\n", error);
+    }
+    lwkt_gettoken(&port->token);
     port->irq_asserted = false;
     port->stopping = false;
+    wakeup(port);
     lwkt_reltoken(&port->token);
-    (void)vmm_machine_set_irq(machine, port->gsi, false);
-    if (read_io != NULL)
-        (void)vmm_machine_untrap(machine, read_io);
-    if (write_io != NULL)
-        (void)vmm_machine_untrap(machine, write_io);
     return 0;
 }
 
@@ -759,24 +783,33 @@ vmmfs_serialport_irq_update(struct vmmfs_serialport *port)
 {
     vmm_machine_t machine;
     bool asserted;
-    bool update;
+    int error;
 
-    update = false;
-    machine = NULL;
-    asserted = false;
     lwkt_gettoken(&port->token);
-    if (port->machine != NULL && !port->stopping && !port->destroying &&
-        !port->closed) {
-        asserted = vmmfs_serialport_irq_pending_locked(port);
-        if (port->irq_asserted != asserted) {
-            port->irq_asserted = asserted;
-            machine = port->machine;
-            update = true;
-        }
+    if (port->irq_busy) {
+        lwkt_reltoken(&port->token);
+        return;
     }
+    port->irq_busy = true;
+    while (port->machine != NULL && !port->stopping &&
+        !port->destroying && !port->closed) {
+        asserted = vmmfs_serialport_irq_pending_locked(port);
+        if (port->irq_asserted == asserted)
+            break;
+        machine = port->machine;
+        lwkt_reltoken(&port->token);
+        error = vmm_machine_set_irq(machine, port->gsi, asserted);
+        lwkt_gettoken(&port->token);
+        if (error != 0) {
+            kprintf("vmmfs: serial IRQ update: %d\n", error);
+            break;
+        }
+        port->irq_asserted = asserted;
+        /* Concurrent producers leave the latest UART state for this owner. */
+    }
+    port->irq_busy = false;
+    wakeup(port);
     lwkt_reltoken(&port->token);
-    if (update)
-        (void)vmm_machine_set_irq(machine, port->gsi, asserted);
 }
 
 static bool

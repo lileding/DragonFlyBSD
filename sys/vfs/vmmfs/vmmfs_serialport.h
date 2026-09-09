@@ -62,6 +62,8 @@ struct vmmfs_serialport {
 	bool thre_pending;
 	bool lsr_overrun;
 	bool irq_asserted;
+	/* Single IRQ owner; stop drains it before releasing the runtime. */
+	bool irq_busy;
 	struct vmmfs_serialring host_to_guest;
 };
 
