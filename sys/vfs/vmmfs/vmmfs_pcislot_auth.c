@@ -57,16 +57,16 @@ static struct fileops vmmfs_pcislot_auth_fileops = {
 
 int
 vmmfs_pcislot_auth_create(struct vmmfs_pcislot *slot, uint64_t generation,
-	struct vmmfs_pcislot_auth **authp)
+	struct vmmfs_pcislot_auth **authp, struct file **filep)
 {
 	struct vmmfs_pcislot_auth *auth;
 	struct file *file;
-	int fd;
 	int error;
 
-	if (slot == NULL || generation == 0 || authp == NULL)
+	if (slot == NULL || generation == 0 || authp == NULL || filep == NULL)
 		return (EINVAL);
 	*authp = NULL;
+	*filep = NULL;
 	auth = kmalloc(sizeof(*auth), M_VMMFS, M_WAITOK | M_ZERO);
 	auth->slot = slot;
 	vmmfs_node_hold(&slot->node);
@@ -82,13 +82,7 @@ vmmfs_pcislot_auth_create(struct vmmfs_pcislot *slot, uint64_t generation,
 	file->f_flag = FREAD;
 	file->f_ops = &vmmfs_pcislot_auth_fileops;
 	file->f_data = auth;
-	error = fdalloc(curproc, 0, &fd);
-	if (error != 0) {
-		fdrop(file);
-		goto fail;
-	}
-	fsetfd(curproc->p_fd, file, fd);
-	fdrop(file);
+	*filep = file;
 	*authp = auth;
 	return (0);
 

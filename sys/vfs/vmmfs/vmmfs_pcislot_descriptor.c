@@ -5,6 +5,8 @@
  */
 #include <sys/errno.h>
 #include <sys/time.h>
+#include <sys/file.h>
+#include <sys/filedesc.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
@@ -181,7 +183,8 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	struct vmmfs_machine *machine;
 	struct vmmfs_pciroot *pciroot;
 	struct vmmfs_pcislot *slot;
-	char *buffer;
+	struct file *file;
+	int fd;
 	uint64_t generation;
 	bool removing;
 	bool updating;
@@ -193,16 +196,15 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	slot = vmmfs_pcislot_descriptor_slot(descriptor);
 	pciroot = vmmfs_pcislot_pciroot(slot);
 	machine = vmmfs_pciroot_machine(pciroot);
-	buffer = NULL;
+	file = NULL;
+	fd = -1;
 	value = NULL;
 	new_auth = NULL;
 	updating = false;
 	removing = length == 0;
 	if (!removing) {
-		buffer = kmalloc(length, M_VMMFS, M_WAITOK);
-		bcopy(text, buffer, length);
 		value = kmalloc(sizeof(*value), M_VMMFS, M_WAITOK | M_ZERO);
-		error = vmmfs_pcislot_descriptor_parse(buffer, length, value);
+		error = vmmfs_pcislot_descriptor_parse(text, length, value);
 		if (error != 0)
 			goto failed;
 	}
@@ -222,7 +224,10 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	lwkt_reltoken(&slot->token);
 	if (!removing) {
 		error = vmmfs_pcislot_auth_create(slot, generation,
-		    &new_auth);
+		    &new_auth, &file);
+		if (error != 0)
+			goto failed;
+		error = fdalloc(curproc, 0, &fd);
 		if (error != 0)
 			goto failed;
 	}
@@ -249,6 +254,9 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	}
 	descriptor->generation = generation;
 	committed = !removing;
+	/* Publication cannot fail; until now the reserved fd had no file. */
+	if (file != NULL)
+		fsetfd(curproc->p_fd, file, fd);
 	lwkt_reltoken(&machine->token);
 	lwkt_reltoken(&slot->token);
 	vmmfs_pcislot_auth_revoke(old_auth);
@@ -260,6 +268,8 @@ vmmfs_pcislot_descriptor_store(struct vmmfs_node *node, const char *text,
 	goto finished;
 
 failed:
+	if (fd >= 0)
+		fsetfd(curproc->p_fd, NULL, fd);
 	vmmfs_pcislot_auth_revoke(new_auth);
 finished:
 	if (updating) {
@@ -270,8 +280,8 @@ finished:
 	}
 	if (value != NULL)
 		kfree(value, M_VMMFS);
-	if (buffer != NULL)
-		kfree(buffer, M_VMMFS);
+	if (file != NULL)
+		fdrop(file);
 	return (error);
 }
 

@@ -8,11 +8,13 @@
 
 #include <sys/types.h>
 
+struct file;
 struct vmmfs_pcislot;
 struct vmmfs_pcislot_auth;
 
+/* Return an auth reference and a file reference; the caller publishes the fd. */
 int vmmfs_pcislot_auth_create(struct vmmfs_pcislot *, uint64_t,
-	struct vmmfs_pcislot_auth **);
+	struct vmmfs_pcislot_auth **, struct file **);
 void vmmfs_pcislot_auth_revoke(struct vmmfs_pcislot_auth *);
 int vmmfs_pcislot_auth_check(struct vmmfs_pcislot *);
 

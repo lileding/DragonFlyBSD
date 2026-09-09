@@ -1090,8 +1090,6 @@ struct vmmfs_pcislot_auth {
 };
 struct file { int references, f_type, f_flag; void *f_ops, *f_data; };
 struct process { void *p_fd; };
-static struct process process;
-#define curproc (&process)
 #define M_VMMFS 0
 #define M_WAITOK 0
 #define M_ZERO 0
@@ -1122,12 +1120,6 @@ static void fdrop(struct file *f) {
         free(f);
     }
 }
-static int fdalloc(struct process *p, int low, int *fd) {
-    (void)p; (void)low; *fd = 3; return 0;
-}
-static void fsetfd(void *p, struct file *f, int fd) {
-    (void)p; (void)fd; ++f->references; descriptor_file = f;
-}
 static void
 """ + function("vmmfs_pcislot_auth.c", "vmmfs_pcislot_auth_put") + """
 int
@@ -1138,10 +1130,10 @@ int main(void) {
     struct vmmfs_pcislot slot = { .node.references=1, .node.inode=7 };
     struct vmmfs_pcislot_auth *auth;
     failure = 1;
-    assert(vmmfs_pcislot_auth_create(&slot, 1, &auth) == ENOMEM);
+    assert(vmmfs_pcislot_auth_create(&slot, 1, &auth, &descriptor_file) == ENOMEM);
     assert(allocations == 0 && slot.node.references == 1);
     failure = 0;
-    assert(vmmfs_pcislot_auth_create(&slot, 1, &auth) == 0);
+    assert(vmmfs_pcislot_auth_create(&slot, 1, &auth, &descriptor_file) == 0);
     assert(slot.node.references == 2 && allocations == 1);
     vmmfs_pcislot_auth_revoke(auth);
     assert(auth->valid == 0 && slot.node.references == 2);
