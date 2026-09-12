@@ -1,0 +1,256 @@
+.\" Copyright (c) 2026 The DragonFly Project.  All rights reserved.
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd September 12, 2026
+.Dt SHMFD 9
+.Os
+.Sh NAME
+.Nm shmfd ,
+.Nm shmfd_init ,
+.Nm shmfd_mmap ,
+.Nm shmfd_close ,
+.Nm shmfd_revoke
+.Nd caller-owned file-mapping facade for a VM object
+.Sh SYNOPSIS
+.In sys/types.h
+.In sys/file.h
+.In sys/shmfd.h
+.In vm/vm.h
+.Ft int
+.Fn shmfd_init "struct shmfd *shmfd" "vm_object_t object" "off_t size"
+.Ft int
+.Fn shmfd_mmap "struct file *fp" "vm_map_t map" "vm_offset_t *addr" "vm_size_t size" "vm_prot_t prot" "vm_prot_t maxprot" "int flags" "vm_ooffset_t foff" "struct thread *td"
+.Ft void
+.Fn shmfd_close "struct shmfd *shmfd"
+.Ft int
+.Fn shmfd_revoke "struct shmfd *shmfd"
+.Sh DESCRIPTION
+The
+.Nm
+interface provides the VM-mapping part of a file-backed kernel export without
+requiring a vnode, a cdev, or a mount point.
+It is a kernel programming interface, not a user ABI.
+In particular, it does not create descriptors, name objects, or implement
+the POSIX shared-memory or memfd user interfaces.
+.Pp
+The facade is deliberately caller-owned.
+The provider embeds a
+.Vt struct shmfd
+in an enclosing export object, owns that enclosing object's allocation and
+reference/lifetime policy, and constructs the
+.Vt struct file
+and its
+.Vt struct fileops .
+The facade retains one reference to the supplied VM object and supplies only
+the generic mapping, close, and device-memory revoke operations.
+It never allocates or frees the enclosing object, never creates or destroys a
+.Vt struct file ,
+never installs descriptor operations, and never calls
+.Fn fdrevoke .
+.Pp
+This division is intended for providers such as drivers and kernel services
+which already own an object lifetime, a KLD unload reference, and any
+non-mapping file operations.
+It also permits the provider to embed application-specific state adjacent to
+the facade rather than placing such state in the VM or VFS layers.
+.Sh INITIALIZATION AND FILE COMPOSITION
+Before exposing the object, the provider calls
+.Fn shmfd_init .
+The
+.Fa object
+argument is an already constructed VM object and
+.Fa size
+is the exported byte range.
+The range must be non-negative, representable, and no larger than the object.
+The provider retains its input reference; on success,
+.Fn shmfd_init
+takes an additional reference which is released by
+.Fn shmfd_close .
+.Pp
+The caller must associate the facade with a file as follows:
+.Bl -bullet -offset indent
+.It
+Set
+.Fa fp->f_type
+to
+.Dv DTYPE_SHM .
+.It
+Set
+.Fa fp->f_data
+to the address of the embedded
+.Vt struct shmfd .
+.It
+Use
+.Fn shmfd_mmap
+as the file operation's
+.Fa fo_mmap
+method.
+.It
+Provide the remaining file operations, including a close method appropriate
+for the enclosing object.
+.El
+.Pp
+The close method normally calls
+.Fn shmfd_close
+exactly once when the composed file object can no longer dispatch any operation
+through its
+.Fa f_data .
+The provider chooses whether that close also permits final release of the
+enclosing state.
+.Pp
+.Fn shmfd_close
+clears the facade and releases only its retained VM-object reference.
+It neither revokes mappings nor deallocates a pager, and it does not free the
+enclosing storage.
+It may close an unrevoked
+.Dv OBJT_DEVICE
+facade.
+If a provider does so while a source mapping remains, it must retain the pager
+handle and all state used by that pager until the VM object is torn down.
+A provider which instead needs to release that state must call
+.Fn shmfd_revoke
+before its final release.
+.Sh MAPPING
+.Fn shmfd_mmap
+is directly suitable for a
+.Vt struct fileops
+.Fa fo_mmap
+method.
+It validates that
+.Fa fp
+is a
+.Dv DTYPE_SHM
+file whose
+.Fa f_data
+is a live facade, then installs an ordinary VM mapping of the object's pager.
+The caller-selected VM object determines the paging semantics; mapping is not
+limited to a particular object type.
+.Pp
+The mapped range is bounded by the declared export size rounded upward to a
+page boundary.
+The offset must be page aligned.
+Ordinary
+.Dv MAP_SHARED
+and private copy-on-write mappings are supported.
+.Dv MAP_STACK
+and
+.Dv MAP_VPAGETABLE
+are rejected.
+The latter is excluded because its page-table ownership cannot be revoked
+through the normal VM-object backing-list path.
+.Pp
+The maximum protection is derived from the file access flags and the
+.Fa maxprot
+limit supplied by the VM layer.
+.Dv FREAD
+permits read and execute mappings.
+Shared writable mappings additionally require
+.Dv FWRITE .
+A private mapping may request write access without
+.Dv FWRITE
+because writes are copy-on-write and do not modify the exported object.
+.Pp
+As with other file mapping methods, successful mapping does not transfer
+ownership of the facade or its object to the VM map.
+The enclosing provider must keep the composed file object and facade valid
+until their normal close path runs.
+.Sh REVOCATION
+.Fn shmfd_revoke
+irreversibly detaches a device-memory export from its provider.
+It accepts only an
+.Dv OBJT_DEVICE
+object.
+In particular,
+.Dv OBJT_SWAP ,
+.Dv OBJT_MGTDEVICE ,
+and other object types are not revocable through this interface.
+An
+.Dv OBJT_SWAP
+facade is suitable for ordinary pageable user-to-user shared memory, but its
+lifetime is closed with
+.Fn shmfd_close ,
+not with
+.Fn shmfd_revoke .
+.Pp
+Before calling
+.Fn shmfd_revoke ,
+the provider must remove all of its kernel mappings of the exported device
+memory and quiesce any provider activity which can create new ones.
+Revocation forcibly removes user mappings; it is not a mechanism for
+coordinating independent kernel consumers.
+.Pp
+The function serializes with new mappings, closes VM fault admission, waits for
+previously admitted VM fault work and paging-in-progress activity to finish,
+and invalidates the object's mappings and resident pages.
+It then deallocates the device pager while the object is still
+.Dv OBJT_DEVICE
+and changes the object to a terminal type.
+Consequently, after a successful return no later page fault can enter the
+provider pager.
+An existing shared mapping which is subsequently accessed faults and is
+normally reported to user space as
+.Dv SIGSEGV .
+.Pp
+Private copy-on-write pages which have already been copied into the mapping
+belong to that process and remain usable.
+Only an access which still requires the revoked source object faults.
+Thus revocation removes access to provider backing; it does not reclaim
+process-private COW data.
+.Pp
+Revocation affects VM mappings only.
+To disable reads, writes, ioctls, or other file operations on outstanding file
+descriptors, the provider may separately call
+.Fn fdrevoke
+with the embedded facade address and
+.Dv DTYPE_SHM .
+The provider chooses the credential passed to
+.Fn fdrevoke ;
+a revoke initiated from a prison applies only to descriptors in that prison.
+Since descriptor revocation can cause the final close callback to run, possibly
+freeing the enclosing object, a provider must not dereference the facade or
+enclosing object after a call which may trigger that final release.
+.Pp
+For a loadable provider, a usual sequence is to make its outstanding-export
+counter prevent unload, revoke the device-memory facade, optionally revoke its
+descriptors, and let each final close drop the provider's counter.
+.Fn shmfd_revoke
+makes it safe for later user faults to avoid provider pager code; the provider
+remains responsible for blocking KLD unload until every composed file object
+and its enclosing state have completed their close path.
+.Sh RETURN VALUES
+.Fn shmfd_init
+returns zero on success or
+.Er EINVAL
+for an invalid facade, object, size, terminal object, or range larger than the
+object.
+.Pp
+.Fn shmfd_mmap
+returns zero on success.
+It returns
+.Er EINVAL
+for an invalid or closed facade, invalid flags, offset, or range, and
+.Er EACCES
+when the requested protection exceeds the file's permitted maximum protection.
+Errors from VM-map insertion are returned using the normal
+.Xr mmap 2
+error mapping.
+.Pp
+.Fn shmfd_revoke
+returns zero on success,
+.Er EINVAL
+for a null or closed facade,
+.Er EALREADY
+when the object has already entered its terminal state or fault admission has
+already been closed, and
+.Er EOPNOTSUPP
+when the object is not
+.Dv OBJT_DEVICE .
+.Sh SEE ALSO
+.Xr mmap 2 ,
+.Xr vnode 9
+.Sh AUTHORS
+The
+.Nm
+interface and this manual page were written for
+.An "The DragonFly Project" .

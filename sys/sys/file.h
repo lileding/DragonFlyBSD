@@ -60,6 +60,12 @@
 #ifndef _SYS__UIO_H_
 #include <sys/_uio.h>
 #endif
+#ifndef _VM_VM_H_
+#include <vm/vm.h>
+#endif
+#ifndef _VM_VM_MAP_H_
+#include <vm/vm_map.h>
+#endif
 
 struct stat;
 struct proc;
@@ -72,6 +78,9 @@ struct vnode;
 struct lwkt_port;
 struct namecache;
 struct sysmsg;
+
+typedef int fo_mmap_t(struct file *, vm_map_t, vm_offset_t *, vm_size_t,
+	vm_prot_t, vm_prot_t, int, vm_ooffset_t, struct thread *);
 
 struct	fileops {
 	int (*fo_read)	(struct file *fp, struct uio *uio,
@@ -86,6 +95,7 @@ struct	fileops {
 	int (*fo_close)	(struct file *fp);
 	int (*fo_shutdown)(struct file *fp, int how);
 	int (*fo_seek)	(struct file *fp, off_t offset, int whence, off_t *res);
+	fo_mmap_t *fo_mmap;
 };
 
 /*
@@ -130,6 +140,7 @@ struct file {
 #define DTYPE_CRYPTO	6	/* crypto */
 #define DTYPE_MQUEUE	7	/* message queue */
 #define DTYPE_DMABUF	8	/* DRM DMA buffer */
+#define DTYPE_SHM	9	/* anonymous shared memory file */
 
 LIST_HEAD(filelist, file);
 
@@ -148,6 +159,8 @@ int fp_read(struct file *, void *, size_t, ssize_t *, int, enum uio_seg);
 int fp_write(struct file *, void *, size_t, ssize_t *, enum uio_seg);
 int fp_stat(struct file *, struct stat *);
 int fp_mmap(void *, size_t, int, int, struct file *, off_t, void **);
+int vn_mmap(struct file *, vm_map_t, vm_offset_t *, vm_size_t,
+    vm_prot_t, vm_prot_t, int, vm_ooffset_t, struct thread *);
 
 int nofo_shutdown(struct file *, int);
 
@@ -173,6 +186,21 @@ int badfo_stat(struct file *fp, struct stat *sb, struct ucred *cred);
 int badfo_close(struct file *fp);
 int badfo_shutdown(struct file *fp, int how);
 int badfo_seek(struct file *fp, off_t offset, int whence, off_t *res);
+int badfo_mmap(struct file *fp, vm_map_t map, vm_offset_t *addr, vm_size_t size,
+    vm_prot_t prot, vm_prot_t maxprot, int flags, vm_ooffset_t foff,
+    struct thread *td);
+
+static __inline int
+fo_mmap(struct file *fp, vm_map_t map, vm_offset_t *addr, vm_size_t size,
+	vm_prot_t prot, vm_prot_t maxprot, int flags, vm_ooffset_t foff,
+	struct thread *td)
+{
+	if (fp->f_ops->fo_mmap == NULL)
+		return (badfo_mmap(fp, map, addr, size, prot, maxprot, flags,
+		    foff, td));
+	return (fp->f_ops->fo_mmap(fp, map, addr, size, prot, maxprot, flags,
+	    foff, td));
+}
 
 #endif /* _KERNEL */
 

@@ -378,6 +378,56 @@ VMOBJDEBUG(vm_object_drop)(vm_object_t obj VMOBJDBARGS)
 	}
 }
 
+
+/*
+ * Atomically stop new users, preserving the count of admitted users.
+ * Only the caller which changes OPEN to CLOSED owns the close operation.
+ * This is not a lifetime-reference release or pager teardown.
+ */
+boolean_t
+vm_object_access_close(vm_object_t object)
+{
+	u_int state;
+
+	state = object->access_state;
+	for (;;) {
+		cpu_ccfence();
+		if (state & VM_OBJECT_ACCESS_CLOSED)
+			return (FALSE);
+		if (atomic_fcmpset_int(&object->access_state, &state,
+		    state | VM_OBJECT_ACCESS_CLOSED))
+			return (TRUE);
+	}
+}
+
+/*
+ * Drain an already closed object.  Register before rechecking the count
+ * so that a concurrent last exit cannot leave a missed wakeup.
+ *
+ * The caller must not hold a hard lock needed by an admitted user, and
+ * must retain its own lifetime reference until this function returns.
+ */
+void
+vm_object_access_wait(vm_object_t object, const char *waitid)
+{
+	u_int state;
+	int error;
+
+	for (;;) {
+		tsleep_interlock(&object->access_state, 0);
+		state = object->access_state;
+		cpu_ccfence();
+		KKASSERT(state & VM_OBJECT_ACCESS_CLOSED);
+		if ((state & VM_OBJECT_ACCESS_COUNT) == 0) {
+			crit_enter();
+			tsleep_remove(curthread);
+			crit_exit();
+			break;
+		}
+		error = tsleep(&object->access_state, PINTERLOCKED, waitid, 0);
+		KKASSERT(error == 0);
+	}
+}
 /*
  * Initialize a freshly allocated object, returning a held object.
  *
@@ -406,6 +456,7 @@ _vm_object_allocate(objtype_t type, vm_pindex_t size, vm_object_t object,
 	if ((object->type == OBJT_DEFAULT) || (object->type == OBJT_SWAP))
 		vm_object_set_flag(object, OBJ_ONEMAPPING);
 	object->paging_in_progress = 0;
+	object->access_state = 0;
 	object->resident_page_count = 0;
 	/* cpu localization twist */
 	object->pg_color = vm_quickcolor();
@@ -1374,13 +1425,14 @@ vm_object_page_remove(vm_object_t object, vm_pindex_t start, vm_pindex_t end,
 	/*
 	 * Degenerate cases and assertions.
 	 *
-	 * NOTE: Don't shortcut on resident_page_count for MGTDEVICE objects.
-	 *	 These objects do not have to have their pages entered into
-	 *	 them and are handled via their vm_map_backing lists.
+	 * NOTE: Don't shortcut on resident_page_count for device objects.
+	 *	 OBJT_MGTDEVICE objects do not have to have their pages entered
+	 *	 into them; OBJT_DEVICE shmfd facades may still need their
+	 *	 vm_map_backing lists invalidated.
 	 */
 	vm_object_hold(object);
 	if (object == NULL ||
-	    (object->type != OBJT_MGTDEVICE &&
+	    (object->type != OBJT_MGTDEVICE && object->type != OBJT_DEVICE &&
 	     object->resident_page_count == 0 && object->swblock_count == 0)) {
 		vm_object_drop(object);
 		return;
@@ -1447,8 +1499,8 @@ vm_object_page_remove(vm_object_t object, vm_pindex_t start, vm_pindex_t end,
 			 *	 in the pmap, as the backing area may be
 			 *	 overloaded.
 			 *
-			 * NOTE! pages for MGTDEVICE objects are only removed
-			 *	 here, they aren't entered into rb_memq, so
+	 * NOTE! pages for device objects can require removal only
+	 *	 here rather than through rb_memq, so
 			 *	 we must use pmap_remove() instead of
 			 *	 the non-TLB-invalidating pmap_remove_pages().
 			 */

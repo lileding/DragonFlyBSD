@@ -195,7 +195,8 @@ struct fileops devfs_dev_fileops = {
 	.fo_stat	= devfs_fo_stat,
 	.fo_close	= devfs_fo_close,
 	.fo_shutdown	= nofo_shutdown,
-	.fo_seek	= devfs_fo_seek
+	.fo_seek	= devfs_fo_seek,
+	.fo_mmap	= vn_mmap
 };
 
 /*

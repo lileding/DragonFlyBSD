@@ -3544,7 +3544,8 @@ struct fileops badfileops = {
 	.fo_stat = badfo_stat,
 	.fo_close = badfo_close,
 	.fo_shutdown = badfo_shutdown,
-	.fo_seek = badfo_seek
+	.fo_seek = badfo_seek,
+	.fo_mmap = badfo_mmap
 };
 
 int
@@ -3590,6 +3591,16 @@ int
 badfo_shutdown(struct file *fp, int how)
 {
 	return (EBADF);
+}
+
+int
+badfo_mmap(struct file *fp __unused, vm_map_t map __unused,
+    vm_offset_t *addr __unused, vm_size_t size __unused,
+    vm_prot_t prot __unused, vm_prot_t maxprot __unused,
+    int flags __unused, vm_ooffset_t foff __unused,
+    struct thread *td __unused)
+{
+	return (EINVAL);
 }
 
 int

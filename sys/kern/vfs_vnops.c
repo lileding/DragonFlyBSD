@@ -56,10 +56,12 @@
 #include <sys/spinlock.h>
 #include <sys/spinlock2.h>
 #include <sys/unistd.h>
+#include <sys/mman.h>
 
 #include <sys/mplock2.h>
 
 #include <vm/vm_object.h>
+#include <vm/vm_extern.h>
 
 #include <machine/limits.h>
 
@@ -82,8 +84,76 @@ struct fileops vnode_fileops = {
 	.fo_stat = vn_statfile,
 	.fo_close = vn_closefile,
 	.fo_shutdown = nofo_shutdown,
-	.fo_seek = vn_seek
+	.fo_seek = vn_seek,
+	.fo_mmap = vn_mmap
 };
+
+int
+vn_mmap(struct file *fp, vm_map_t map, vm_offset_t *addr, vm_size_t size,
+    vm_prot_t prot, vm_prot_t maxprot, int flags, vm_ooffset_t foff,
+    struct thread *td __unused)
+{
+	struct vnode *vp;
+	struct vattr va;
+	vm_prot_t file_maxprot;
+	void *handle;
+	int error;
+
+	vp = (struct vnode *)fp->f_data;
+	if (fp->f_flag & FPOSIXSHM)
+		flags |= MAP_NOSYNC;
+	if (vp->v_type != VREG && vp->v_type != VCHR)
+		return (EINVAL);
+	if (vp->v_type == VREG) {
+		if (vp->v_object == NULL)
+			return (EINVAL);
+		KKASSERT((struct vnode *)vp->v_object->handle == vp);
+	} else if (vp->v_rdev == NULL) {
+		return (EBADF);
+	}
+	if (vp->v_type == VCHR && iszerodev(vp->v_rdev)) {
+		handle = NULL;
+		maxprot = VM_PROT_ALL;
+		flags |= MAP_ANON;
+		foff = 0;
+	} else {
+		if (vp->v_type == VCHR && (flags & (MAP_PRIVATE|MAP_COPY)))
+			return (EINVAL);
+		file_maxprot = VM_PROT_EXECUTE;
+		if (fp->f_flag & FREAD) {
+			file_maxprot |= VM_PROT_READ;
+		} else if (prot & VM_PROT_READ) {
+			return (EACCES);
+		}
+		if ((flags & MAP_SHARED) != 0 || vp->v_type == VCHR) {
+			if (fp->f_flag & FWRITE) {
+				error = VOP_GETATTR_FP(vp, &va, fp);
+				if (error != 0)
+					return (error);
+				if ((va.va_flags & (IMMUTABLE|APPEND)) == 0) {
+					file_maxprot |= VM_PROT_WRITE;
+					if ((prot & VM_PROT_WRITE) &&
+					    vp->v_type == VREG &&
+					    vn_lock(vp, LK_EXCLUSIVE | LK_RETRY) == 0) {
+						vfs_timestamp(&vp->v_lastwrite_ts);
+						vsetflags(vp, VLASTWRITETS);
+						vn_unlock(vp);
+					}
+				} else if (prot & VM_PROT_WRITE) {
+					return (EPERM);
+				}
+			} else if (prot & VM_PROT_WRITE) {
+				return (EACCES);
+			}
+		} else {
+			file_maxprot |= VM_PROT_WRITE;
+		}
+		handle = vp;
+		maxprot &= file_maxprot;
+	}
+	return (vm_mmap(map, addr, size, prot, maxprot, flags, handle, foff,
+	    fp));
+}
 
 /*
  * Common code for vnode open operations.  Check permissions, and call

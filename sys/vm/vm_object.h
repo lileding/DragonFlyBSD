@@ -147,6 +147,7 @@ struct vm_object {
 	u_short		flags;		/* see below */
 	u_short		pg_color;	/* color of first page in obj */
 	u_int		paging_in_progress;	/* Activity in progress */
+	u_int		access_state;	/* atomic admission and active users */
 	long		resident_page_count;	/* number of resident pages */
 	TAILQ_ENTRY(vm_object) pager_object_entry; /* optional use by pager */
 	void		*handle;	/* control handle: vp, etc */
@@ -267,11 +268,57 @@ extern int vm_shared_fault;
 #define VM_OBJECT_LOCK(object)		vm_object_hold(object)
 #define VM_OBJECT_UNLOCK(object)	vm_object_drop(object)
 
+
+/*
+ * Access admission is independent of references and paging_in_progress.
+ * The caller must keep a lifetime reference through exit (and through wait
+ * for the closing owner).  Closing is permanent and does not change the
+ * pager, OBJ_DEAD, or ownership of any resident page.
+ *
+ * A successful enter covers the last use of the backing, not merely the
+ * pager call.  Accesses remain concurrent; the close owner drains them
+ * before invalidating mappings or disposing of the backing.
+ */
+#define VM_OBJECT_ACCESS_CLOSED	0x80000000U
+#define VM_OBJECT_ACCESS_COUNT	0x7fffffffU
+
+static __inline boolean_t
+vm_object_access_enter(vm_object_t object)
+{
+	u_int state;
+
+	state = object->access_state;
+	for (;;) {
+		cpu_ccfence();
+		if (state & VM_OBJECT_ACCESS_CLOSED)
+			return (FALSE);
+		KKASSERT((state & VM_OBJECT_ACCESS_COUNT) !=
+		    VM_OBJECT_ACCESS_COUNT);
+		if (atomic_fcmpset_int(&object->access_state, &state, state + 1))
+			return (TRUE);
+	}
+}
+
+static __inline void
+vm_object_access_exit(vm_object_t object)
+{
+	u_int state;
+
+	state = atomic_fetchadd_int(&object->access_state, -1);
+	KKASSERT((state & VM_OBJECT_ACCESS_COUNT) != 0);
+	if (state == (VM_OBJECT_ACCESS_CLOSED | 1))
+		wakeup(&object->access_state);
+}
+
+boolean_t vm_object_access_close(vm_object_t);
+void vm_object_access_wait(vm_object_t, const char *);
+
 static __inline void
 vm_object_set_flag(vm_object_t object, u_int bits)
 {
 	atomic_set_short(&object->flags, bits);
 }
+
 
 static __inline void
 vm_object_clear_flag(vm_object_t object, u_int bits)

@@ -154,6 +154,7 @@ MAN=	accept_filter.9 \
 	sensor_attach.9 \
 	serializer.9 \
 	sglist.9 \
+	shmfd.9 \
 	sleep.9 \
 	spinlock.9 \
 	store.9 \
@@ -886,6 +887,10 @@ MLINKS+=sglist.9 sglist_alloc.9 \
 	sglist.9 sglist_reset.9 \
 	sglist.9 sglist_slice.9 \
 	sglist.9 sglist_split.9
+MLINKS+=shmfd.9 shmfd_init.9 \
+	shmfd.9 shmfd_mmap.9 \
+	shmfd.9 shmfd_close.9 \
+	shmfd.9 shmfd_revoke.9
 MLINKS+=sleep.9 lksleep.9 \
 	sleep.9 mtxsleep.9 \
 	sleep.9 ssleep.9 \

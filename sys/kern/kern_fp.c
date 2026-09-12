@@ -396,13 +396,9 @@ fp_mmap(void *addr_arg, size_t size, int prot, int flags, struct file *fp,
     struct thread *td = curthread;
     struct proc *p = td->td_proc;
     vm_size_t pageoff;
-    vm_prot_t maxprot;
     vm_offset_t addr;
-    void *handle;
     int error;
-    vm_object_t obj;
     struct vmspace *vms = p->p_vmspace;
-    struct vnode *vp;
 
     prot &= VM_PROT_ALL;
 
@@ -452,106 +448,12 @@ fp_mmap(void *addr_arg, size_t size, int prot, int flags, struct file *fp,
 	addr = round_page((vm_offset_t)vms->vm_daddr + maxdsiz);
     }
 
-    /*
-     * Mapping file, get fp for validation. Obtain vnode and make
-     * sure it is of appropriate type.
-     */
-    if (fp->f_type != DTYPE_VNODE)
-	return (EINVAL);
-
-    /*
-     * POSIX shared-memory objects are defined to have
-     * kernel persistence, and are not defined to support
-     * read(2)/write(2) -- or even open(2).  Thus, we can
-     * use MAP_ASYNC to trade on-disk coherence for speed.
-     * The shm_open(3) library routine turns on the FPOSIXSHM
-     * flag to request this behavior.
-     */
-    if (fp->f_flag & FPOSIXSHM)
-	flags |= MAP_NOSYNC;
-    vp = (struct vnode *) fp->f_data;
-    if (vp->v_type != VREG && vp->v_type != VCHR)
-	return (EINVAL);
-
-    /*
-     * Get the proper underlying object
-     */
-    if (vp->v_type == VREG) {
-	if ((obj = vp->v_object) == NULL)
-	    return (EINVAL);
-	KKASSERT(vp == (struct vnode *)obj->handle);
-    }
-
-    /*
-     * XXX hack to handle use of /dev/zero to map anon memory (ala
-     * SunOS).
-     */
-    if (vp->v_type == VCHR && iszerodev(vp->v_rdev)) {
-	handle = NULL;
-	maxprot = VM_PROT_ALL;
-	flags |= MAP_ANON;
-	pos = 0;
-    } else {
-	/*
-	 * cdevs does not provide private mappings of any kind.
-	 */
-	if (vp->v_type == VCHR && 
-	    (flags & (MAP_PRIVATE|MAP_COPY))) {
-		error = EINVAL;
-		goto done;
-	}
-	/*
-	 * Ensure that file and memory protections are
-	 * compatible.  Note that we only worry about
-	 * writability if mapping is shared; in this case,
-	 * current and max prot are dictated by the open file.
-	 * XXX use the vnode instead?  Problem is: what
-	 * credentials do we use for determination? What if
-	 * proc does a setuid?
-	 */
-	maxprot = VM_PROT_EXECUTE;	/* ??? */
-	if (fp->f_flag & FREAD) {
-	    maxprot |= VM_PROT_READ;
-	} else if (prot & PROT_READ) {
-	    error = EACCES;
-	    goto done;
-	}
-	/*
-	 * If we are sharing potential changes (either via
-	 * MAP_SHARED or via the implicit sharing of character
-	 * device mappings), and we are trying to get write
-	 * permission although we opened it without asking
-	 * for it, bail out.  
-	 */
-
-	if ((flags & MAP_SHARED) != 0 ||
-	    (vp->v_type == VCHR)
-	) {
-	    if ((fp->f_flag & FWRITE) != 0) {
-		struct vattr va;
-		if ((error = VOP_GETATTR_FP(vp, &va, fp))) {
-		    goto done;
-		}
-		if ((va.va_flags & (IMMUTABLE|APPEND)) == 0) {
-		    maxprot |= VM_PROT_WRITE;
-		} else if (prot & PROT_WRITE) {
-		    error = EPERM;
-		    goto done;
-		}
-	    } else if ((prot & PROT_WRITE) != 0) {
-		error = EACCES;
-		goto done;
-	    }
-	} else {
-	    maxprot |= VM_PROT_WRITE;
-	}
-	handle = (void *)vp;
-    }
-    error = vm_mmap(&vms->vm_map, &addr, size, prot, 
-		    maxprot, flags, handle, pos, fp);
+	lwkt_gettoken(&vms->vm_map.token);
+	error = fo_mmap(fp, &vms->vm_map, &addr, size, prot,
+	    VM_PROT_ALL, flags, pos, td);
+	lwkt_reltoken(&vms->vm_map.token);
     if (error == 0 && addr_arg)
 	*resp = (void *)addr;
-done:
     return (error);
 }
 
@@ -566,4 +468,3 @@ fp_shutdown(file_t fp, int how)
 {
     return(fo_shutdown(fp, how));
 }
-

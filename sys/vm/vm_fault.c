@@ -149,6 +149,8 @@ struct faultstate {
 	int first_shared;
 	int wflags;
 	int first_ba_held;	/* 0=unlocked 1=locked/rel -1=lock/atomic */
+	vm_object_t first_access;	/* admitted first object, through PTE install */
+	vm_object_t ba_access;	/* admitted backing object, through last use */
 	struct vnode *vp;
 };
 
@@ -227,9 +229,32 @@ release_page(struct faultstate *fs)
 	fs->mary[0] = NULL;
 }
 
+/*
+ * A COW front object and its source can both remain live while a fault
+ * resolves.  Each admission lasts through that object's final page use.
+ */
+static __inline void
+fault_ba_access_exit(struct faultstate *fs)
+{
+	if (fs->ba_access != NULL) {
+		vm_object_access_exit(fs->ba_access);
+		fs->ba_access = NULL;
+	}
+}
+
+static __inline void
+fault_first_access_exit(struct faultstate *fs)
+{
+	if (fs->first_access != NULL) {
+		vm_object_access_exit(fs->first_access);
+		fs->first_access = NULL;
+	}
+}
+
 static __inline void
 unlock_map(struct faultstate *fs)
 {
+	fault_ba_access_exit(fs);
 	if (fs->ba != fs->first_ba)
 		vm_object_drop(fs->ba->object);
 	if (fs->first_ba && fs->first_ba_held == 1) {
@@ -238,6 +263,7 @@ unlock_map(struct faultstate *fs)
 		fs->first_ba = NULL;
 	}
 	fs->ba = NULL;
+	fault_first_access_exit(fs);
 
 	/*
 	 * NOTE: If lookup_still_valid == -1 the map is assumed to be locked
@@ -275,6 +301,7 @@ cleanup_fault(struct faultstate *fs)
 			vm_page_free(fs->first_m);
 		}
 		vm_object_pip_wakeup(fs->ba->object);
+		fault_ba_access_exit(fs);
 		fs->first_m = NULL;
 
 		/*
@@ -426,6 +453,8 @@ vm_fault(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type, int fault_flags)
 	fs.vp = NULL;
 	fs.shared = vm_shared_fault;
 	fs.first_shared = vm_shared_fault;
+	fs.first_access = NULL;
+	fs.ba_access = NULL;
 	growstack = 1;
 
 	/*
@@ -587,6 +616,12 @@ RetryFault:
 		panic("vm_fault: unrecoverable fault at %p in entry %p",
 			(void *)vaddr, fs.entry);
 	}
+	if (!vm_object_access_enter(fs.first_ba->object)) {
+		result = KERN_PROTECTION_FAILURE;
+		unlock_things(&fs);
+		goto done2;
+	}
+	fs.first_access = fs.first_ba->object;
 
 	/*
 	 * Fail here if not a trivial anonymous page fault and TDF_NOFAULT
@@ -834,16 +869,18 @@ success:
 	 * operation we had to be sure to unbusy our primary vm_page above
 	 * first.
 	 *
-	 * A normal burst can continue down backing store, only execute
-	 * if we are holding an exclusive lock, otherwise the exclusive
-	 * locks the burst code gets might cause excessive SMP collisions.
+	 * A normal burst can walk backing store.  Do not issue it for a
+	 * backing chain: this fault has admitted only the first object,
+	 * while each backing source needs its own admission.  Skipping the
+	 * burst is safe; later faults take the ordinary guarded path.
 	 *
 	 * A quick burst can be utilized when there is no backing object
 	 * (i.e. a shared file mmap).
 	 */
 	if ((fault_flags & VM_FAULT_BURST) &&
 	    (fs.fault_flags & VM_FAULT_WIRE_MASK) == 0 &&
-	    (fs.wflags & FW_WIRED) == 0) {
+	    (fs.wflags & FW_WIRED) == 0 &&
+	    fs.first_ba->backing_ba == NULL) {
 		if (fs.first_shared == 0 && fs.shared == 0) {
 			vm_prefault(fs.map->pmap, vaddr,
 				    fs.entry, fs.prot, fault_flags);
@@ -976,7 +1013,7 @@ vm_fault_bypass(struct faultstate *fs, vm_pindex_t first_pindex,
 #endif
 		return KERN_FAILURE;
 	}
-	if ((obj->flags & OBJ_DEAD) ||
+	if ((obj->flags & OBJ_DEAD) || obj->type == OBJT_DEAD ||
 	    m->valid != VM_PAGE_BITS_ALL ||
 	    m->queue - m->pc != PQ_ACTIVE ||
 	    (m->flags & PG_SWAPPED)) {
@@ -1159,6 +1196,8 @@ vm_fault_page(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
 	fs.shared = vm_shared_fault;
 	fs.first_shared = vm_shared_fault;
 	fs.msoftonly = 0;
+	fs.first_access = NULL;
+	fs.ba_access = NULL;
 	growstack = 1;
 
 	/*
@@ -1304,6 +1343,13 @@ RetryFault:
 		panic("vm_fault: unrecoverable fault at %p in entry %p",
 			(void *)vaddr, fs.entry);
 	}
+	if (!vm_object_access_enter(fs.first_ba->object)) {
+		*errorp = KERN_PROTECTION_FAILURE;
+		unlock_things(&fs);
+		fs.mary[0] = NULL;
+		goto done2;
+	}
+	fs.first_access = fs.first_ba->object;
 
 	/*
 	 * Fail here if not a trivial anonymous page fault and TDF_NOFAULT
@@ -1467,13 +1513,6 @@ RetryFault:
 	}
 
 	/*
-	 * On success vm_fault_object() does not unlock or deallocate, and
-	 * fs.mary[0] will contain a busied page.  So we must unlock here
-	 * after having messed with the pmap.
-	 */
-	unlock_things(&fs);
-
-	/*
 	 * Return a held page.  We are not doing any pmap manipulation so do
 	 * not set PG_MAPPED.  However, adjust the page flags according to
 	 * the fault type because the caller may not use a managed pmapping
@@ -1508,6 +1547,12 @@ RetryFault:
 		vm_page_hold(fs.mary[0]);
 		vm_page_wakeup(fs.mary[0]);
 	}
+
+	/*
+	 * The admitted backing has no further page or pmap use.  A returned
+	 * held page is governed by the caller's existing page-hold contract.
+	 */
+	unlock_things(&fs);
 	/*vm_object_deallocate(fs.first_ba->object);*/
 	*errorp = 0;
 
@@ -1558,6 +1603,8 @@ vm_fault_object_page(vm_object_t object, vm_ooffset_t offset,
 	fs.msoftonly = 0;
 	fs.vp = NULL;
 	fs.first_ba_held = -1;	/* object held across call, prevent drop */
+	fs.first_access = NULL;
+	fs.ba_access = NULL;
 	KKASSERT((fault_flags & VM_FAULT_WIRE_MASK) == 0);
 
 	/*
@@ -1582,6 +1629,11 @@ RetryFault:
 	fs.entry = &entry;
 	fs.first_prot = fault_type;
 	fs.wflags = 0;
+	if (!vm_object_access_enter(object)) {
+		*errorp = KERN_PROTECTION_FAILURE;
+		return (NULL);
+	}
+	fs.first_access = object;
 
 	/*
 	 * Make a reference to this object to prevent its disposal while we
@@ -1631,12 +1683,6 @@ RetryFault:
 	}
 
 	/*
-	 * On success vm_fault_object() does not unlock or deallocate, so we
-	 * do it here.  Note that the returned fs.m will be busied.
-	 */
-	unlock_things(&fs);
-
-	/*
 	 * Return a held page.  We are not doing any pmap manipulation so do
 	 * not set PG_MAPPED.  However, adjust the page flags according to
 	 * the fault type because the caller may not use a managed pmapping
@@ -1667,6 +1713,7 @@ RetryFault:
 	 * Unlock everything, and return the held page.
 	 */
 	vm_page_wakeup(fs.mary[0]);
+	unlock_things(&fs);
 	/*vm_object_deallocate(fs.first_ba->object);*/
 
 	*errorp = 0;
@@ -1852,6 +1899,7 @@ vm_fault_object(struct faultstate *fs, vm_pindex_t first_pindex,
 	int error;
 
 	ASSERT_LWKT_TOKEN_HELD(vm_object_token(fs->first_ba->object));
+	KKASSERT(fs->first_access == fs->first_ba->object);
 	fs->prot = fs->first_prot;
 	pindex = first_pindex;
 	KKASSERT(fs->ba == fs->first_ba);
@@ -1884,7 +1932,8 @@ vm_fault_object(struct faultstate *fs, vm_pindex_t first_pindex,
 		/*
 		 * If the object is dead, we stop here
 		 */
-		if (fs->ba->object->flags & OBJ_DEAD) {
+		if ((fs->ba->object->flags & OBJ_DEAD) ||
+		    fs->ba->object->type == OBJT_DEAD) {
 			vm_object_pip_wakeup(fs->first_ba->object);
 			unlock_things(fs);
 			return (KERN_PROTECTION_FAILURE);
@@ -2314,6 +2363,7 @@ next:
 			 */
 			if (fs->ba != fs->first_ba) {
 				vm_object_pip_wakeup(fs->ba->object);
+				fault_ba_access_exit(fs);
 				vm_object_drop(fs->ba->object);
 				fs->ba = fs->first_ba;
 				pindex = first_pindex;
@@ -2335,15 +2385,23 @@ next:
 		else
 			vm_object_hold(next_ba->object);
 		KKASSERT(next_ba == fs->ba->backing_ba);
+		if (!vm_object_access_enter(next_ba->object)) {
+			vm_object_drop(next_ba->object);
+			vm_object_pip_wakeup(fs->first_ba->object);
+			unlock_things(fs);
+			return (KERN_PROTECTION_FAILURE);
+		}
 		pindex -= OFF_TO_IDX(fs->ba->offset);
 		pindex += OFF_TO_IDX(next_ba->offset);
 
 		if (fs->ba != fs->first_ba) {
 			vm_object_pip_wakeup(fs->ba->object);
 			vm_object_lock_swap();	/* flip ba/next_ba */
+			fault_ba_access_exit(fs);
 			vm_object_drop(fs->ba->object);
 		}
 		fs->ba = next_ba;
+		fs->ba_access = next_ba->object;
 		vm_object_pip_add(next_ba->object, 1);
 	}
 
@@ -2439,6 +2497,7 @@ next:
 			 * fs->ba != fs->first_ba due to above conditional
 			 */
 			vm_object_pip_wakeup(fs->ba->object);
+			fault_ba_access_exit(fs);
 			vm_object_drop(fs->ba->object);
 			fs->ba = fs->first_ba;
 
@@ -2745,15 +2804,25 @@ vm_fault_collapse(vm_map_t map, vm_map_entry_t entry)
 		all_shadowed = 0;
 		fs.ba = fs.first_ba;
 		fs.prot = fs.first_prot;
+		if (!vm_object_access_enter(object)) {
+			rv = KERN_PROTECTION_FAILURE;
+			break;
+		}
+		fs.first_access = object;
 
 		rv = vm_fault_object(&fs, pindex, fs.first_prot, 1);
-		if (rv == KERN_TRY_AGAIN)
+		if (rv == KERN_TRY_AGAIN) {
+			fault_first_access_exit(&fs);
 			continue;
-		if (rv != KERN_SUCCESS)
+		}
+		if (rv != KERN_SUCCESS) {
+			fault_first_access_exit(&fs);
 			break;
+		}
 		vm_page_flag_set(fs.mary[0], PG_REFERENCED);
 		vm_page_activate(fs.mary[0]);
 		vm_page_wakeup(fs.mary[0]);
+		fault_first_access_exit(&fs);
 		scan += PAGE_SIZE;
 	}
 	KKASSERT(entry->ba.object == object);
