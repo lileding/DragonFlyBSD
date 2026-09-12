@@ -562,4 +562,7 @@ const char *syscallnames[] = {
 	"posix_fallocate",			/* 553 = posix_fallocate */
 	"fdatasync",			/* 554 = fdatasync */
 	"futimesat",			/* 555 = futimesat */
+	"memfd_create",			/* 556 = memfd_create */
+	"shm_open2",			/* 557 = shm_open2 */
+	"shm_unlink",			/* 558 = shm_unlink */
 };

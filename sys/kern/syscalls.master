@@ -739,3 +739,7 @@
 553	STD	{ int posix_fallocate(int fd, off_t offset, off_t len); }
 554	STD	{ int fdatasync(int fd); }
 555	STD	{ int futimesat(int fd, const char *path, const struct timeval *tptr); }
+556	STD	{ int memfd_create(const char *name, u_int flags); }
+557	STD	{ int shm_open2(const char *path, int flags, mode_t mode, \
+			int shmflags, const char *name); }
+558	STD	{ int shm_unlink(const char *path); }

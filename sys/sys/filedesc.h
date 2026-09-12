@@ -165,6 +165,7 @@ int	fdalloc (struct proc *p, int want, int *result);
 int	fdavail (struct proc *p, int n);
 int	falloc (struct lwp *lp, struct file **resultfp, int *resultfd);
 void	fsetfd (struct filedesc *fdp, struct file *fp, int fd);
+void	fsetfd_flags(struct filedesc *fdp, struct file *fp, int fd, int flags);
 int	fgetfdflags(struct filedesc *fdp, int fd, int *flagsp);
 int	faddfdflags(struct filedesc *fdp, int fd, int add_flags);
 int	fsetfdflags(struct filedesc *fdp, int fd, int set_flags);

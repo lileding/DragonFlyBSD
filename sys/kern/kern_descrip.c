@@ -2211,6 +2211,22 @@ fsetfd(struct filedesc *fdp, struct file *fp, int fd)
 }
 
 /*
+ * Publish a file and its initial descriptor flags in one critical section.
+ * The descriptor must have been reserved, and fp must be initialized.
+ * No allocation or operation which can sleep is permitted under fd_spin.
+ */
+void
+fsetfd_flags(struct filedesc *fdp, struct file *fp, int fd, int flags)
+{
+	KKASSERT(fp != NULL);
+	KKASSERT((flags & ~(UF_EXCLOSE | UF_FOCLOSE)) == 0);
+	spin_lock(&fdp->fd_spin);
+	fsetfd_locked(fdp, fp, fd);
+	fdp->fd_files[fd].fileflags = flags;
+	spin_unlock(&fdp->fd_spin);
+}
+
+/*
  * Caller must hold an exclusive spinlock on fdp->fd_spin.
  */
 static 

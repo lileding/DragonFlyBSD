@@ -32,14 +32,17 @@
 .Dt SHM_OPEN 3
 .Os
 .Sh NAME
+.Nm memfd_create ,
 .Nm shm_open ,
 .Nm shm_unlink
-.Nd POSIX shared memory object operations
+.Nd shared memory object operations
 .Sh LIBRARY
 .Lb libc
 .Sh SYNOPSIS
 .In sys/types.h
 .In sys/mman.h
+.Ft int
+.Fn memfd_create "const char *name" "unsigned int flags"
 .Ft int
 .Fn shm_open "const char *path" "int flags" "mode_t mode"
 .Ft int
@@ -48,7 +51,7 @@
 The
 .Fn shm_open
 function opens (or optionally creates) a
-.Tn POSIX
+POSIX
 shared memory object named
 .Fa path .
 The
@@ -58,64 +61,160 @@ function removes a shared memory object named
 Using the same
 .Fa path
 allows unrelated processes to access the same object.
+.Pp
+The
+.Fn memfd_create
+function creates an anonymous shared memory object and returns a file
+descriptor referring to it.
+The object has no pathname and is not visible in the shared memory
+namespace used by
+.Fn shm_open .
+Newly created objects have a size of zero.
+Writes to a memfd automatically grow it to cover the requested range.
+Bytes in a gap before the written range read as zero.
+The size can also be adjusted with
+.Xr ftruncate 2 .
+Objects created by
+.Fn shm_open
+do not automatically grow on write.
+.Pp
+The
+.Fa name
+argument must point to a valid null-terminated string no longer than
+.Dv NAME_MAX
+characters.
+The name is used for diagnostic purposes only and does not identify the
+object.
+Names do not need to be unique.
+.Pp
+The following
+.Fa flags
+may be specified:
+.Bl -tag -width MFD_ALLOW_SEALING
+.It Dv MFD_CLOEXEC
+Set
+.Dv FD_CLOEXEC
+on the returned file descriptor.
+.It Dv MFD_ALLOW_SEALING
+Not currently supported.
+.It Dv MFD_HUGETLB
+Not currently supported.
+.El
+.Pp
+Any object created by
+.Fn memfd_create
+can be resized with
+.Xr ftruncate 2 ,
+read and written with
+.Xr read 2
+and
+.Xr write 2 ,
+and mapped with
+.Xr mmap 2 .
+Both
+.Dv MAP_SHARED
+and
+.Dv MAP_PRIVATE
+mappings are supported.
+Private modifications do not change the shared object.
+A read-only descriptor permits writable private mappings, but not writable
+shared mappings.
+The maximum protection of a shared mapping is limited by the descriptor's
+access mode, including later changes with
+.Xr mprotect 2 .
+.Pp
+A mapping may extend beyond the current size of the object.
+Access to a page wholly beyond the current end of the object faults;
+on DragonFly x86-64 this delivers
+.Dv SIGSEGV ,
+rather than the
+.Dv SIGBUS
+delivered by FreeBSD.
+The unused portion of the final partial page is initially zero-filled.
+Extending the object makes the newly covered pages accessible through
+existing mappings.
+Truncation removes shared pages beyond the new size.
+Mapping the object updates its access timestamp.
+.Pp
+The descriptor can be shared with another process through
+.Xr fork 2
+or
+.Xr sendmsg 2 .
 .Sh IMPLEMENTATION NOTES
 .Dx
-mounts a
-.Xr tmpfs 5
-file system at
-.Pa /var/run/shm .
-.Tn POSIX
-shared memory objects are implemented as ordinary files under
-that directory.
+implements these operations with
+.Xr shmfd 9
+objects.
+Named objects are kept in a kernel-managed shared-memory namespace and are
+not vnode-backed files, so no mountpoint is required.
+The namespace is scoped by the caller's jail; objects in different jails do
+not collide even when they use the same
+.Fa path .
 The
-.Fn shm_open
-and
-.Fn shm_unlink
-functions act as wrappers around
-.Xr open 2
-and
-.Xr unlink 2 .
-Any leading slash
-.Pq Ql \&/
-characters are removed from
 .Fa path
-to make it relative to
-.Pa /var/run/shm .
+for a named object must begin with
+.Ql \&/ .
 The
-.Fa flags
-and
 .Fa mode
-arguments are passed through unaltered.
-.Fa flags
-is checked to ensure that the access mode specified is not
-.Dv O_WRONLY
-(which is not defined for shared memory objects).
-.Pp
-In addition, the
-.Dx
-implementation causes
-.Fn mmap
-of a descriptor returned by
+argument is recorded as the initial object permission mode after applying
+the process creation mask.
+The
 .Fn shm_open
-to behave as if the
-.Dv MAP_NOSYNC
-flag had been specified to
-.Xr mmap 2 .
-(It does so by setting a special file flag using
-.Xr fcntl 2 . )
+library function adds
+.Dv O_CLOEXEC
+and then calls the kernel's
+.Fn shm_open2
+operation.
+The internal
+.Fn shm_open2
+operation also accepts
+.Dv SHM_ANON
+to create an unnamed object.
+The
+.Fn memfd_create
+library function instead invokes the
+.Dv SYS_memfd_create
+system call directly; it does not route through
+.Fn shm_open2 .
+The
+.Fa name
+passed to
+.Fn memfd_create
+is diagnostic metadata only and is not added to the named namespace.
+The kernel copies this string directly from the caller, so an invalid pointer
+causes
+.Dv EFAULT .
+.Pp
+Unlinking a named object removes its namespace entry.
+Open descriptors and mappings continue to hold references to the object until
+they are closed or unmapped.
+The
+.Fn shm_unlink
+operation does not require a vnode or a filesystem directory entry.
 .Sh RETURN VALUES
 If successful,
+.Fn memfd_create
+and
 .Fn shm_open
-returns a non-negative integer;
+return a non-negative integer;
 .Fn shm_unlink
 returns zero.
-Both functions return -1 on failure, and set
+All functions return -1 on failure, and set
 .Va errno
 to indicate the error.
 .Sh COMPATIBILITY
-On
+.Fn memfd_create
+is a
 .Dx
-and many other operating systems the
+extension compatible with the common Linux interface of
+the same name.
+Unlike a pathname-based shared memory object, a memfd has no name that
+can be passed to
+.Fn shm_open
+or removed with
+.Fn shm_unlink .
+.Pp
+On many other operating systems the
 .Fa path
 argument is interpreted as a file system pathname under a special
 directory where a memory-backed file system is mounted.
@@ -132,7 +231,7 @@ On a few systems, shared memory objects live outside the ordinary file
 system in their own dedicated namespace.
 .Pp
 According to
-.Tn POSIX
+POSIX
 two processes opening the same
 .Fa path
 are guaranteed to access the same shared memory object if and only if
@@ -152,7 +251,7 @@ or
 on a file descriptor returned by
 .Fn shm_open ,
 is undefined by
-.Tn POSIX .
+POSIX .
 It is also undefined whether the shared memory object itself, or its
 contents, persist across reboots.
 On
@@ -165,8 +264,51 @@ Only the
 .Dv O_EXCL ,
 and
 .Dv O_TRUNC
-flags may be used in portable programs.
+flags are accepted by the current implementation, in addition to the
+internally added
+.Dv O_CLOEXEC .
+Other open flags, including
+.Dv O_APPEND ,
+.Dv O_NONBLOCK ,
+and
+.Dv O_SYNC ,
+are rejected with
+.Dv EINVAL .
 .Sh ERRORS
+The
+.Fn memfd_create
+function can fail with the following errors:
+.Bl -tag -width Er
+.It Bq Er EFAULT
+The
+.Fa name
+argument does not point to a valid string in the calling process.
+.It Bq Er EINVAL
+The
+.Fa name
+argument is longer than
+.Dv NAME_MAX
+characters.
+.It Bq Er EINVAL
+.Fa flags
+contains an unsupported flag other than
+.Dv MFD_ALLOW_SEALING
+or
+.Dv MFD_HUGETLB .
+.It Bq Er EOPNOTSUPP
+.Fa flags
+contains
+.Dv MFD_ALLOW_SEALING
+or
+.Dv MFD_HUGETLB .
+.It Bq Er EMFILE
+The per-process limit on open file descriptors has been reached.
+.It Bq Er ENFILE
+The system-wide limit on open files has been reached.
+.It Bq Er ENOMEM
+The kernel could not allocate the backing shared-memory object.
+.El
+.Pp
 The
 .Fn shm_open
 and
@@ -180,10 +322,14 @@ In addition, the following errors are defined for
 .Fn shm_open :
 .Bl -tag -width Er
 .It Bq Er EINVAL
-The object named by
+The
 .Fa path
-is not a shared memory object
-(i.e., it is not a regular file).
+argument does not begin with
+.Ql \&/ .
+.It Bq Er ENAMETOOLONG
+The
+.Fa path
+argument exceeds .Dv NAME_MAX characters.
 .It Bq Er EINVAL
 The
 .Fa flags
@@ -191,14 +337,26 @@ argument to
 .Fn shm_open
 specifies an access mode of
 .Dv O_WRONLY .
+.It Bq Er EINVAL
+The
+.Fa flags
+argument contains an unsupported open flag.
 .El
 .Sh SEE ALSO
+.Xr fork 2 ,
+.Xr fstat 2 ,
+.Xr ftruncate 2 ,
 .Xr mmap 2 ,
 .Xr munmap 2 ,
 .Xr open 2 ,
 .Xr unlink 2 ,
-.Xr tmpfs 5
+.Xr shmfd 9
 .Sh STANDARDS
+The
+.Fn memfd_create
+function is expected to be compatible with the Linux system call of the
+same name.
+.Pp
 The
 .Fn shm_open
 and
@@ -206,6 +364,12 @@ and
 functions are believed to conform to
 .St -p1003.1b-93 .
 .Sh HISTORY
+The
+.Fn memfd_create
+function was added as part of the
+.Dx
+shmfd project.
+.Pp
 The
 .Fn shm_open
 and
@@ -215,5 +379,3 @@ functions first appeared in
 .Sh AUTHORS
 .An Garrett A. Wollman Aq Mt wollman@FreeBSD.org
 (C library support and this manual page)
-.An Matthew Dillon Aq Mt dillon@FreeBSD.org
-.Pq Dv MAP_NOSYNC

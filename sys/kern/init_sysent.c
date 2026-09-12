@@ -570,4 +570,7 @@ struct sysent sysent[] = {
 	{ AS(posix_fallocate_args), 4, (sy_call_t *)sys_posix_fallocate },	/* 553 = posix_fallocate */
 	{ AS(fdatasync_args), 4, (sy_call_t *)sys_fdatasync },	/* 554 = fdatasync */
 	{ AS(futimesat_args), 4, (sy_call_t *)sys_futimesat },	/* 555 = futimesat */
+	{ AS(memfd_create_args), 4, (sy_call_t *)sys_memfd_create },	/* 556 = memfd_create */
+	{ AS(shm_open2_args), 4, (sy_call_t *)sys_shm_open2 },	/* 557 = shm_open2 */
+	{ AS(shm_unlink_args), 4, (sy_call_t *)sys_shm_unlink },	/* 558 = shm_unlink */
 };

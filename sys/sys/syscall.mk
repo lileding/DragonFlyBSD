@@ -318,4 +318,7 @@ MIASM =  \
 	fexecve.o \
 	posix_fallocate.o \
 	fdatasync.o \
-	futimesat.o
+	futimesat.o \
+	memfd_create.o \
+	shm_open2.o \
+	shm_unlink.o

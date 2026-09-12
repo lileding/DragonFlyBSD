@@ -1456,6 +1456,20 @@ struct	futimesat_args {
 	const char *	path;	char path_[PAD_(const char *)];
 	const struct timeval *	tptr;	char tptr_[PAD_(const struct timeval *)];
 };
+struct	memfd_create_args {
+	const char *	name;	char name_[PAD_(const char *)];
+	u_int	flags;	char flags_[PAD_(u_int)];
+};
+struct	shm_open2_args {
+	const char *	path;	char path_[PAD_(const char *)];
+	int	flags;	char flags_[PAD_(int)];
+	mode_t	mode;	char mode_[PAD_(mode_t)];
+	int	shmflags;	char shmflags_[PAD_(int)];
+	const char *	name;	char name_[PAD_(const char *)];
+};
+struct	shm_unlink_args {
+	const char *	path;	char path_[PAD_(const char *)];
+};
 
 #undef PAD_
 
@@ -1785,6 +1799,9 @@ int	sys_fexecve (struct sysmsg *sysmsg, const struct fexecve_args *);
 int	sys_posix_fallocate (struct sysmsg *sysmsg, const struct posix_fallocate_args *);
 int	sys_fdatasync (struct sysmsg *sysmsg, const struct fdatasync_args *);
 int	sys_futimesat (struct sysmsg *sysmsg, const struct futimesat_args *);
+int	sys_memfd_create (struct sysmsg *sysmsg, const struct memfd_create_args *);
+int	sys_shm_open2 (struct sysmsg *sysmsg, const struct shm_open2_args *);
+int	sys_shm_unlink (struct sysmsg *sysmsg, const struct shm_unlink_args *);
 
 #endif /* _KERNEL */
 

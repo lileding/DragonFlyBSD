@@ -386,6 +386,7 @@ DF404.0 {
     setttyent;
     setusershell;
     setvfsent;
+    memfd_create;
     shm_open;
     shm_unlink;
     sigaddset;

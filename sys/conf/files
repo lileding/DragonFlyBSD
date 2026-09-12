@@ -1471,6 +1471,7 @@ kern/sysv_ipc.c		standard
 kern/sysv_msg.c		standard
 kern/sysv_sem.c		standard
 kern/sysv_shm.c		standard
+kern/uipc_shm.c		standard
 kern/uipc_shmfd.c	standard
 kern/tty.c		standard
 kern/tty_conf.c		standard

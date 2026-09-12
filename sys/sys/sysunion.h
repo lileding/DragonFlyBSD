@@ -325,4 +325,7 @@ union sysunion {
 	struct	posix_fallocate_args posix_fallocate;
 	struct	fdatasync_args fdatasync;
 	struct	futimesat_args futimesat;
+	struct	memfd_create_args memfd_create;
+	struct	shm_open2_args shm_open2;
+	struct	shm_unlink_args shm_unlink;
 };

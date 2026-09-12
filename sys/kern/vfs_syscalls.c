@@ -75,6 +75,9 @@
 #include <machine/limits.h>
 #include <machine/stdarg.h>
 
+extern struct fileops posix_shmfd_fileops;
+int posix_shmfd_truncate(struct file *, off_t);
+
 #define UMOUNTF_RETRIES		50	/* 0.25 seconds per retry */
 
 static void mount_warning(struct mount *mp, const char *ctl, ...)
@@ -4085,8 +4088,22 @@ kern_ftruncate(int fd, off_t length)
 
 	if (length < 0)
 		return(EINVAL);
-	if ((error = holdvnode(td, fd, &fp)) != 0)
+	fp = holdfp(td, fd, -1);
+	if (fp == NULL)
+		return (EBADF);
+	if (fp->f_type == DTYPE_SHM &&
+	    fp->f_ops == &posix_shmfd_fileops) {
+		if ((fp->f_flag & FWRITE) == 0)
+			error = EINVAL;
+		else
+			error = posix_shmfd_truncate(fp, length);
+		fdrop(fp);
 		return (error);
+	}
+	if (fp->f_type != DTYPE_VNODE && fp->f_type != DTYPE_FIFO) {
+		fdrop(fp);
+		return (EINVAL);
+	}
 	if (fp->f_nchandle.ncp) {
 		error = ncp_writechk(&fp->f_nchandle);
 		if (error)

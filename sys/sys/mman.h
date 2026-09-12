@@ -111,6 +111,18 @@ typedef	__size_t	size_t;
 #define	MAP_32BIT	0x00080000 /* allocate from 32-bit addr space only */
 #endif /* __BSD_VISIBLE */
 
+#if __BSD_VISIBLE
+/* Flags for memfd_create(). */
+#define	MFD_CLOEXEC		0x00000001U
+#define	MFD_ALLOW_SEALING	0x00000002U
+#define	MFD_HUGETLB		0x00000004U
+#endif
+
+#if __BSD_VISIBLE
+/* Anonymous object constant for shm_open2(). */
+#define SHM_ANON ((char *)1)
+#endif
+
 #if __POSIX_VISIBLE >= 199309
 /*
  * Process memory locking
@@ -205,6 +217,9 @@ int	madvise(void *, size_t, int);
 int	mcontrol(void *, size_t, int, off_t);
 int	mincore(const void *, size_t, char *);
 int	minherit(void *, size_t, int);
+#endif
+#if __BSD_VISIBLE
+int	memfd_create(const char *, unsigned int);
 #endif
 __END_DECLS
 

@@ -119,17 +119,26 @@ shmfd_mmap(struct file *fp, vm_map_t map, vm_offset_t *addr, vm_size_t size,
 		lockmgr(&shmfd->shmfd_lock, LK_RELEASE);
 		return (EINVAL);
 	}
-	map_size = (uint64_t)shmfd->shmfd_size;
-	if (map_size > UINT64_MAX - PAGE_MASK) {
-		vm_object_drop(object);
-		lockmgr(&shmfd->shmfd_lock, LK_RELEASE);
-		return (EINVAL);
-	}
-	map_size = (map_size + PAGE_MASK) & ~(uint64_t)PAGE_MASK;
-	if ((uint64_t)foff > map_size || size > map_size - (uint64_t)foff) {
-		vm_object_drop(object);
-		lockmgr(&shmfd->shmfd_lock, LK_RELEASE);
-		return (EINVAL);
+	/*
+	 * POSIX shared memory has the ordinary swap-object semantics: a view
+	 * may precede a later ftruncate(2), and faults beyond the current EOF
+	 * fail until the object is grown.  Other caller-owned pager facades
+	 * remain bounded by their declared size.
+	 */
+	if (object->type != OBJT_SWAP) {
+		map_size = (uint64_t)shmfd->shmfd_size;
+		if (map_size > UINT64_MAX - PAGE_MASK) {
+			vm_object_drop(object);
+			lockmgr(&shmfd->shmfd_lock, LK_RELEASE);
+			return (EINVAL);
+		}
+		map_size = (map_size + PAGE_MASK) & ~(uint64_t)PAGE_MASK;
+		if ((uint64_t)foff > map_size ||
+		    size > map_size - (uint64_t)foff) {
+			vm_object_drop(object);
+			lockmgr(&shmfd->shmfd_lock, LK_RELEASE);
+			return (EINVAL);
+		}
 	}
 	vm_object_drop(object);
 

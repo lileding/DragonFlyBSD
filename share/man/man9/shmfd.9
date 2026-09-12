@@ -127,8 +127,18 @@ is a live facade, then installs an ordinary VM mapping of the object's pager.
 The caller-selected VM object determines the paging semantics; mapping is not
 limited to a particular object type.
 .Pp
-The mapped range is bounded by the declared export size rounded upward to a
+For objects other than
+.Dv OBJT_SWAP ,
+the mapped range is bounded by the declared export size rounded upward to a
 page boundary.
+An
+.Dv OBJT_SWAP
+object has the ordinary POSIX shared-memory behavior: a mapping may extend
+beyond the current declared size.
+Access to a wholly uncovered page faults until the object is extended, while
+the uncovered portion of a final partial page reads as zero.
+Extending the object makes the newly covered pages available through an
+existing mapping.
 The offset must be page aligned.
 Ordinary
 .Dv MAP_SHARED
@@ -229,7 +239,8 @@ object.
 returns zero on success.
 It returns
 .Er EINVAL
-for an invalid or closed facade, invalid flags, offset, or range, and
+for an invalid or closed facade, invalid flags, offset, or a range beyond a
+non-swap facade's declared size, and
 .Er EACCES
 when the requested protection exceeds the file's permitted maximum protection.
 Errors from VM-map insertion are returned using the normal

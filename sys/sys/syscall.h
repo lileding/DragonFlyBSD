@@ -383,4 +383,7 @@
 #define	SYS_posix_fallocate	553
 #define	SYS_fdatasync	554
 #define	SYS_futimesat	555
-#define	SYS_MAXSYSCALL	556
+#define	SYS_memfd_create	556
+#define	SYS_shm_open2	557
+#define	SYS_shm_unlink	558
+#define	SYS_MAXSYSCALL	559

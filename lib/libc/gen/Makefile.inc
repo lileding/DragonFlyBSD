@@ -27,7 +27,7 @@ SRCS+=  __errno_location.c _once_stub.c _pthread_stubs.c _rand48.c \
 	getusershell.c getvfsbyname.c getvfsent.c glob.c \
 	initgroups.c isatty.c isinf.c isfinite.c isnan.c isnormal.c \
 	jrand48.c killpg.c lcong48.c ldexp.c libc_dlopen.c \
-	lockf.c lrand48.c modf.c mrand48.c sysvipc_msgctl.c \
+	lockf.c lrand48.c memfd_create.c modf.c mrand48.c sysvipc_msgctl.c \
 	sysvipc_msgget.c sysvipc_msgrcv.c sysvipc_msgsnd.c nftw.c nice.c \
 	nlist.c nrand48.c ntp_gettime.c opendir.c \
 	pause.c pmadvise.c popen.c posix_spawn.c posixshm.c \
@@ -256,7 +256,8 @@ MLINKS+=setjmp.3 _longjmp.3 \
 	setjmp.3 siglongjmp.3 \
 	setjmp.3 sigsetjmp.3
 MLINKS+=setmode.3 getmode.3
-MLINKS+=shm_open.3 shm_unlink.3
+MLINKS+=shm_open.3 memfd_create.3 \
+	shm_open.3 shm_unlink.3
 MLINKS+=sigsetops.3 sigaddset.3 \
 	sigsetops.3 sigdelset.3 \
 	sigsetops.3 sigemptyset.3 \

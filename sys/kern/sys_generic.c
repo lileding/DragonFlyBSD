@@ -77,6 +77,8 @@ static MALLOC_DEFINE(M_IOCTLMAP, "ioctlmap", "mapped ioctl handler buffer");
 static MALLOC_DEFINE(M_SELECT, "select", "select() buffer");
 MALLOC_DEFINE(M_IOV, "iov", "large iov's");
 
+extern struct fileops posix_shmfd_fileops;
+
 static struct krate krate_poll = { .freq = 1 };
 
 typedef struct kfd_set {
@@ -258,7 +260,9 @@ kern_preadv(int fd, struct uio *auio, int flags, size_t *res)
 	fp = holdfp(td, fd, FREAD);
 	if (fp == NULL)
 		return (EBADF);
-	if (flags & O_FOFFSET && fp->f_type != DTYPE_VNODE) {
+	if ((flags & O_FOFFSET) && fp->f_type != DTYPE_VNODE &&
+	    (fp->f_type != DTYPE_SHM ||
+	     fp->f_ops != &posix_shmfd_fileops)) {
 		error = ESPIPE;
 	} else {
 		error = dofileread(fd, fp, auio, flags, res);
@@ -462,7 +466,9 @@ kern_pwritev(int fd, struct uio *auio, int flags, size_t *res)
 	fp = holdfp(td, fd, FWRITE);
 	if (fp == NULL)
 		return (EBADF);
-	else if ((flags & O_FOFFSET) && fp->f_type != DTYPE_VNODE) {
+	else if ((flags & O_FOFFSET) && fp->f_type != DTYPE_VNODE &&
+	    (fp->f_type != DTYPE_SHM ||
+	     fp->f_ops != &posix_shmfd_fileops)) {
 		error = ESPIPE;
 	} else {
 		error = dofilewrite(fd, fp, auio, flags, res);
