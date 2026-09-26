@@ -2001,6 +2001,10 @@ vfs/devfs/devfs_vnops.c		standard
 vfs/devfs/devfs_vfsops.c	standard
 vfs/devfs/devfs_helper.c	standard
 vfs/devfs/devfs_rules.c		standard
+vfs/cgroupfs/cgroupfs_file.c	optional cgroupfs
+vfs/cgroupfs/cgroupfs_group.c	optional cgroupfs
+vfs/cgroupfs/cgroupfs_vfsops.c	optional cgroupfs
+vfs/cgroupfs/cgroupfs_vnops.c	optional cgroupfs
 vfs/hammer/hammer_blockmap.c	optional hammer
 vfs/hammer/hammer_btree.c	optional hammer
 vfs/hammer/hammer_cursor.c	optional hammer

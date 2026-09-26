@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# Guest /etc/rc.local for the vkernel harness: run the cgroupfs test once,
+# report a machine-readable result on the console, then power off.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+echo "=== cgroupfs harness start ==="
+if /root/cgroupfs_test.sh; then
+	status=0
+else
+	status=1
+fi
+echo "RESULT cgroupfs: ${status}"
+echo "=== cgroupfs harness done ==="
+sync
+# halt(8) calls reboot(2) directly; poweroff(8) signals init, which is
+# still running /etc/rc here and may miss the request.
+halt -p
+exit "${status}"
