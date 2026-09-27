@@ -99,13 +99,25 @@ int		cgroup_control_update(struct cgroup *, uint32_t, uint32_t,
 void		cgroup_proc_init0(struct proc *);
 /*
  * fork1(), parent's p_token held: returns the parent's group, held and
- * counted, for the child.  Fails only for an exiting parent.
+ * charged, for the child.  Fails with EAGAIN for an exiting parent, a
+ * closed group (being killed) or a pids limit.  For a non-root group the
+ * group's fork gate stays held shared until cgroup_proc_started() (the
+ * child is running) or cgroup_proc_fork_abort() (fork1() failed later).
  */
 int		cgroup_proc_fork(struct proc *, struct cgroup **);
+void		cgroup_proc_started(struct proc *);
+void		cgroup_proc_fork_abort(struct cgroup *);
 /* exit1(), p_token held and P_WEXIT set: the process stops counting. */
 void		cgroup_proc_exit(struct proc *);
 /* The zombie is reaped: releases its group. */
 void		cgroup_proc_reap(struct proc *);
+/*
+ * SIGKILLs every process of the group's subtree.  The subtree stays closed
+ * to forks and migration until it has no live process left, so nothing
+ * escapes.  EINVAL for the root, ENOENT for a removed group.
+ */
+int		cgroup_kill(struct cgroup *);
+
 /* Moves process pid (0: the caller) into the group. */
 int		cgroup_proc_migrate(struct cgroup *, pid_t, struct ucred *);
 /*

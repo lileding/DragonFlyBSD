@@ -27,12 +27,16 @@ struct cgroupfs_file_desc {
 	mode_t			mode;
 	/* Zero for core files present in every group. */
 	uint32_t		controller;
+	/* Absent from the root group. */
+	bool			nonroot;
 	cgroupfs_file_load_t	load;
 	/* NULL exactly when the mode grants no write access. */
 	cgroupfs_file_store_t	store;
 };
 
 static int cgroupfs_load_controllers(struct cgroup *,
+	const struct cgroup_control *, struct sbuf *);
+static int cgroupfs_load_unreadable(struct cgroup *,
 	const struct cgroup_control *, struct sbuf *);
 static int cgroupfs_load_procs(struct cgroup *, const struct cgroup_control *,
 	struct sbuf *);
@@ -42,6 +46,8 @@ static int cgroupfs_load_pids_current(struct cgroup *,
 	const struct cgroup_control *, struct sbuf *);
 static int cgroupfs_load_pids_max(struct cgroup *,
 	const struct cgroup_control *, struct sbuf *);
+static int cgroupfs_store_kill(struct cgroup *, const char *, size_t,
+	struct ucred *, bool *);
 static int cgroupfs_store_procs(struct cgroup *, const char *, size_t,
 	struct ucred *, bool *);
 static int cgroupfs_store_subtree_control(struct cgroup *, const char *,
@@ -50,14 +56,18 @@ static int cgroupfs_store_pids_max(struct cgroup *, const char *, size_t,
 	struct ucred *, bool *);
 
 static const struct cgroupfs_file_desc cgroupfs_files[] = {
-	{ "cgroup.controllers", 0444, 0, cgroupfs_load_controllers, NULL },
-	{ "cgroup.procs", 0644, 0, cgroupfs_load_procs, cgroupfs_store_procs },
-	{ "cgroup.subtree_control", 0644, 0, cgroupfs_load_subtree_control,
-	    cgroupfs_store_subtree_control },
-	{ "pids.current", 0444, CGROUP_CONTROLLER_PIDS,
+	{ "cgroup.controllers", 0444, 0, false, cgroupfs_load_controllers,
+	    NULL },
+	{ "cgroup.kill", 0200, 0, true, cgroupfs_load_unreadable,
+	    cgroupfs_store_kill },
+	{ "cgroup.procs", 0644, 0, false, cgroupfs_load_procs,
+	    cgroupfs_store_procs },
+	{ "cgroup.subtree_control", 0644, 0, false,
+	    cgroupfs_load_subtree_control, cgroupfs_store_subtree_control },
+	{ "pids.current", 0444, CGROUP_CONTROLLER_PIDS, true,
 	    cgroupfs_load_pids_current, NULL },
-	{ "pids.max", 0644, CGROUP_CONTROLLER_PIDS, cgroupfs_load_pids_max,
-	    cgroupfs_store_pids_max },
+	{ "pids.max", 0644, CGROUP_CONTROLLER_PIDS, true,
+	    cgroupfs_load_pids_max, cgroupfs_store_pids_max },
 };
 
 CTASSERT(nitems(cgroupfs_files) == CGROUPFS_FILE_COUNT);
@@ -90,19 +100,21 @@ cgroupfs_file_find(const char *name, size_t namelen)
 }
 
 /*
- * Controller interface files follow Linux: never on the root, and only
- * where the parent has enabled the controller for its subtree.
+ * Follows Linux: controller interface files, like cgroup.kill, never
+ * appear on the root, and controller files only where the parent has
+ * enabled the controller for its subtree.
  */
 bool
 cgroupfs_file_present(u_int index, const struct cgroup_control *control)
 {
-	uint32_t controller;
+	const struct cgroupfs_file_desc *desc;
 
 	KKASSERT(index < nitems(cgroupfs_files));
-	controller = cgroupfs_files[index].controller;
-	if (controller == 0)
-		return (true);
-	return (!control->is_root && (control->available & controller) != 0);
+	desc = &cgroupfs_files[index];
+	if (desc->nonroot && control->is_root)
+		return (false);
+	return (desc->controller == 0 ||
+	    (control->available & desc->controller) != 0);
 }
 
 int
@@ -155,6 +167,17 @@ cgroupfs_load_controllers(struct cgroup *cg,
 {
 	(void)cg;
 	return (cgroupfs_format_mask(control->available, sb));
+}
+
+/* Write-only files. */
+static int
+cgroupfs_load_unreadable(struct cgroup *cg,
+    const struct cgroup_control *control, struct sbuf *sb)
+{
+	(void)cg;
+	(void)control;
+	(void)sb;
+	return (EINVAL);
 }
 
 static int
@@ -231,6 +254,20 @@ cgroupfs_store_pids_max(struct cgroup *cg, const char *buffer, size_t length,
 			return (EINVAL);
 	}
 	return (cgroup_pids_set_max(cg, max));
+}
+
+/* "1", optionally newline terminated, kills the subtree. */
+static int
+cgroupfs_store_kill(struct cgroup *cg, const char *buffer, size_t length,
+    struct ucred *cred, bool *changedp)
+{
+	(void)cred;
+	(void)changedp;
+	if (length > 0 && buffer[length - 1] == '\n')
+		--length;
+	if (length != 1 || buffer[0] != '1')
+		return (EINVAL);
+	return (cgroup_kill(cg));
 }
 
 /*

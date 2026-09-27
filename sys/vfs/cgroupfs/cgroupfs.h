@@ -88,7 +88,7 @@ void	cgroupfs_vnode_finalize(struct vnode *);
  * text and the kernel's control group interface.
  */
 
-#define CGROUPFS_FILE_COUNT	5
+#define CGROUPFS_FILE_COUNT	6
 /* Largest accepted write. */
 #define CGROUPFS_FILE_SIZE_MAX	128
 

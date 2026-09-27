@@ -326,6 +326,7 @@ fork1(struct lwp *lp1, int flags, struct proc **procp)
 	lwkt_gettoken(&p1->p_token);
 	plkgrp = NULL;
 	p2 = NULL;
+	cg = NULL;
 
 	/*
 	 * Here we don't create a new process, but we divorce
@@ -441,8 +442,10 @@ fork1(struct lwp *lp1, int flags, struct proc **procp)
 	}
 
 	/*
-	 * Charge the parent's control group for the child.  This only fails
-	 * for an exiting parent, so the child never joins a removed group.
+	 * Charge the parent's control group for the child.  This fails for
+	 * an exiting parent, so the child never joins a removed group, for a
+	 * group being killed and for its pids limit.  On success the group's
+	 * fork gate stays held until start_forked_proc().
 	 */
 	error = cgroup_proc_fork(p1, &cg);
 	if (error != 0) {
@@ -738,6 +741,9 @@ fork1(struct lwp *lp1, int flags, struct proc **procp)
 	*procp = p2;
 	error = 0;
 done:
+	/* A failure after charging must still open the fork gate. */
+	if (error != 0 && cg != NULL)
+		cgroup_proc_fork_abort(cg);
 	if (p2)
 		lwkt_reltoken(&p2->p_token);
 	lwkt_reltoken(&p1->p_token);
@@ -971,6 +977,9 @@ start_forked_proc(struct lwp *lp1, struct proc *p2)
 	lp2->lwp_stat = LSRUN;
 	p2->p_usched->setrunqueue(lp2);
 	crit_exit();
+
+	/* The child is running and visible to cgroup kill: open the gate. */
+	cgroup_proc_started(p2);
 
 	/*
 	 * Now can be swapped.

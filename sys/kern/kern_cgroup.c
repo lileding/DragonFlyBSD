@@ -18,6 +18,14 @@
  * and exit.  A live parent is itself counted in its group, which therefore
  * cannot be destroyed underneath fork.
  *
+ * Kill: every non-root group has a fork gate.  fork1() holds the gate of
+ * the child's group shared from charging until the child runs; kill takes
+ * the gates of its subtree exclusively, which waits out forks in flight,
+ * closes the groups, and then signals every member in a single scan.  A
+ * closed group refuses forks and migration until its subtree has no live
+ * process left (nlive), because a process already sent SIGKILL may still
+ * enter fork() before the signal is acted upon.
+ *
  * pids: each group counts the processes of its subtree, from fork until
  * reap.  Charging increments every level up to the root and backs out if
  * any exceeds its limit.  A limit other than unlimited only exists where
@@ -32,6 +40,7 @@
 #include <sys/malloc.h>
 #include <sys/proc.h>
 #include <sys/refcount.h>
+#include <sys/signalvar.h>
 #include <sys/tree.h>
 
 #include <machine/atomic.h>
@@ -55,6 +64,12 @@ struct cgroup {
 	u_int			nprocs;
 	/* Processes of the subtree until reaped; atomic. */
 	u_int			pids;
+	/* Processes of the subtree until they exit; atomic. */
+	u_int			nlive;
+	/* Held shared by forks in flight, exclusive by kill; unused by root. */
+	struct lock		gate;
+	/* Set by kill, cleared when nlive drops to zero; atomic. */
+	volatile u_int		closed;
 	/* Written under the exclusive lock, read locklessly by fork. */
 	u_int			pids_max;
 	/* Written under the exclusive lock; only turns true. */
@@ -73,6 +88,7 @@ static struct cgroup cgroup_root_group = {
 	.refs = 1,
 	.id = 0,
 	.pids_max = CGROUP_PIDS_UNLIMITED,
+	.gate = LOCK_INITIALIZER("cgrpgate", 0, 0),
 };
 
 /* Protected by the exclusive hierarchy lock. */
@@ -142,6 +158,7 @@ cgroup_drop(struct cgroup *cg)
 		KKASSERT(cg->dead);
 		KKASSERT(RB_EMPTY(&cg->children));
 		parent = cg->parent;
+		lockuninit(&cg->gate);
 		kfree(cg, M_CGROUP);
 		cg = parent;
 	}
@@ -256,6 +273,7 @@ cgroup_create(struct cgroup *parent, const char *name, size_t namelen,
 	child->name[namelen] = '\0';
 	child->refs = 2;	/* registration and caller */
 	child->pids_max = CGROUP_PIDS_UNLIMITED;
+	lockinit(&child->gate, "cgrpgate", 0, 0);
 
 	cgroup_lock_exclusive();
 	if (parent->dead) {
@@ -273,6 +291,7 @@ cgroup_create(struct cgroup *parent, const char *name, size_t namelen,
 	cgroup_unlock();
 
 	if (error != 0) {
+		lockuninit(&child->gate);
 		kfree(child, M_CGROUP);
 		return (error);
 	}
@@ -359,6 +378,27 @@ cgroup_pids_sub(struct cgroup *cg, struct cgroup *stop)
 		atomic_add_int(&cg->pids, -1);
 }
 
+static void
+cgroup_nlive_add(struct cgroup *cg, struct cgroup *stop)
+{
+	for (; cg != stop; cg = cg->parent)
+		atomic_add_int(&cg->nlive, 1);
+}
+
+/*
+ * The last live process leaving a closed subtree reopens it.  Kill closes
+ * before it samples nlive and we decrement before we sample closed, both
+ * with locked instructions, so one of the two always reopens.
+ */
+static void
+cgroup_nlive_sub(struct cgroup *cg, struct cgroup *stop)
+{
+	for (; cg != stop; cg = cg->parent) {
+		if (atomic_fetchadd_int(&cg->nlive, -1) == 1 && cg->closed)
+			atomic_clear_int(&cg->closed, 1);
+	}
+}
+
 /*
  * Charges one new process to cg and all its ancestors, or none of them if
  * a level would exceed its limit.  Concurrent charges may both overshoot
@@ -434,27 +474,67 @@ cgroup_proc_init0(struct proc *p)
 	cgroup_hold(root);
 	atomic_add_int(&root->nprocs, 1);
 	cgroup_pids_add(root, NULL);
+	cgroup_nlive_add(root, NULL);
 	p->p_cgroup = root;
 }
 
 int
 cgroup_proc_fork(struct proc *parent, struct cgroup **cgp)
 {
+	struct cgroup *root = &cgroup_root_group;
 	struct cgroup *cg;
 	int error;
 
-	/* Nothing below blocks, so parent's p_token stays held throughout. */
-	if (parent->p_flags & P_WEXIT)
-		return (EAGAIN);
-	cg = parent->p_cgroup;
-	KKASSERT(cg != NULL);
-	error = cgroup_pids_try_charge(cg);
-	if (error != 0)
+	/*
+	 * Taking a gate may block, which releases parent's p_token: pin the
+	 * group, then recheck that the parent still belongs to it.  The
+	 * pinning reference becomes the child's.
+	 */
+	for (;;) {
+		if (parent->p_flags & P_WEXIT)
+			return (EAGAIN);
+		cg = parent->p_cgroup;
+		KKASSERT(cg != NULL);
+		cgroup_hold(cg);
+		if (cg == root)
+			break;
+		lockmgr(&cg->gate, LK_SHARED);
+		if (parent->p_cgroup == cg && (parent->p_flags & P_WEXIT) == 0)
+			break;
+		lockmgr(&cg->gate, LK_RELEASE);
+		cgroup_drop(cg);
+	}
+
+	/* Nothing below blocks. */
+	if (cg->closed)
+		error = EAGAIN;
+	else
+		error = cgroup_pids_try_charge(cg);
+	if (error != 0) {
+		if (cg != root)
+			lockmgr(&cg->gate, LK_RELEASE);
+		cgroup_drop(cg);
 		return (error);
-	cgroup_hold(cg);
+	}
+	cgroup_nlive_add(cg, NULL);
 	atomic_add_int(&cg->nprocs, 1);
 	*cgp = cg;
 	return (0);
+}
+
+/* The child runs: kill may now see it on the allproc list. */
+void
+cgroup_proc_started(struct proc *p)
+{
+	if (p->p_cgroup != &cgroup_root_group)
+		lockmgr(&p->p_cgroup->gate, LK_RELEASE);
+}
+
+void
+cgroup_proc_fork_abort(struct cgroup *cg)
+{
+	if (cg != &cgroup_root_group)
+		lockmgr(&cg->gate, LK_RELEASE);
 }
 
 void
@@ -462,6 +542,7 @@ cgroup_proc_exit(struct proc *p)
 {
 	KKASSERT(p->p_flags & P_WEXIT);
 	atomic_add_int(&p->p_cgroup->nprocs, -1);
+	cgroup_nlive_sub(p->p_cgroup, NULL);
 }
 
 void
@@ -512,6 +593,13 @@ cgroup_proc_migrate(struct cgroup *cg, pid_t pid, struct ucred *cred)
 		lwkt_gettoken(&p->p_token);
 		if (p->p_flags & P_WEXIT) {
 			error = ESRCH;
+		} else if (p->p_stat == SIDL) {
+			/* Its fork still holds the gate of its group. */
+			error = EBUSY;
+		} else if (p->p_cgroup != cg &&
+		    (p->p_cgroup->closed || cg->closed)) {
+			/* Neither escaping nor joining a group being killed. */
+			error = EBUSY;
 		} else if (p->p_cgroup != cg) {
 			old = p->p_cgroup;
 			/*
@@ -522,6 +610,8 @@ cgroup_proc_migrate(struct cgroup *cg, pid_t pid, struct ucred *cred)
 			common = cgroup_common_ancestor(old, cg);
 			cgroup_pids_sub(old, common);
 			cgroup_pids_add(cg, common);
+			cgroup_nlive_add(cg, common);
+			cgroup_nlive_sub(old, common);
 			cgroup_hold(cg);
 			atomic_add_int(&cg->nprocs, 1);
 			p->p_cgroup = cg;
@@ -587,4 +677,84 @@ void
 cgroup_procs_free(pid_t *pids)
 {
 	kfree(pids, M_CGROUP);
+}
+
+/* Preorder successor of g within the subtree rooted at top, or NULL. */
+static struct cgroup *
+cgroup_subtree_next(struct cgroup *top, struct cgroup *g)
+{
+	struct cgroup *next;
+
+	if ((next = RB_MIN(cgroup_children, &g->children)) != NULL)
+		return (next);
+	while (g != top) {
+		next = RB_NEXT(cgroup_children, &g->parent->children, g);
+		if (next != NULL)
+			return (next);
+		g = g->parent;
+	}
+	return (NULL);
+}
+
+/* The hierarchy lock keeps every p_cgroup and parent chain stable. */
+static int
+cgroup_kill_callback(struct proc *p, void *data)
+{
+	struct cgroup *target = data;
+	struct cgroup *level;
+
+	if (p->p_flags & P_SYSTEM)
+		return (0);
+	for (level = p->p_cgroup; level != NULL; level = level->parent) {
+		if (level == target) {
+			ksignal(p, SIGKILL);
+			break;
+		}
+	}
+	return (0);
+}
+
+int
+cgroup_kill(struct cgroup *cg)
+{
+	struct cgroup **groups;
+	struct cgroup *g;
+	u_int count;
+	u_int index;
+
+	if (cg == &cgroup_root_group)
+		return (EINVAL);
+	/* Shared: keeps migration, mkdir and rmdir out until we are done. */
+	cgroup_lock_shared();
+	if (cg->dead) {
+		cgroup_unlock();
+		return (ENOENT);
+	}
+	count = 0;
+	for (g = cg; g != NULL; g = cgroup_subtree_next(cg, g))
+		++count;
+	groups = kmalloc(sizeof(*groups) * count, M_CGROUP, M_WAITOK);
+	index = 0;
+	for (g = cg; g != NULL; g = cgroup_subtree_next(cg, g))
+		groups[index++] = g;
+
+	/*
+	 * Parents first.  The exclusive gate waits for forks in flight, whose
+	 * children are then running and visible to the scan; once closed, no
+	 * further fork or migration adds a member.
+	 */
+	for (index = 0; index < count; ++index) {
+		lockmgr(&groups[index]->gate, LK_EXCLUSIVE);
+		atomic_set_int(&groups[index]->closed, 1);
+		lockmgr(&groups[index]->gate, LK_RELEASE);
+	}
+	allproc_scan(cgroup_kill_callback, cg, 0);
+	/* Groups that were already empty will see no exit to reopen them. */
+	for (index = 0; index < count; ++index) {
+		if (groups[index]->nlive == 0)
+			atomic_clear_int(&groups[index]->closed, 1);
+	}
+	cgroup_unlock();
+	kfree(groups, M_CGROUP);
+	return (0);
 }

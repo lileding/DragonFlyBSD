@@ -28,7 +28,7 @@ cleanup() {
 	done
 	if mount -t cgroupfs cgroupfs "${mountpoint}"; then
 		printf '%s\n' "$$" >"${mountpoint}/cgroup.procs" || true
-		for group in a/b a b c x y z; do
+		for group in a/b a/z a b c d e x y z; do
 			[ -d "${mountpoint}/${group}" ] &&
 			    rmdir "${mountpoint}/${group}" || true
 		done
@@ -146,7 +146,7 @@ expect_error "mkdir existing group" "File exists" mkdir "${root}/a"
 expect_eq "root listing with groups" "$(listing "${root}")" \
     "a c cgroup.controllers cgroup.procs cgroup.subtree_control"
 expect_eq "a listing, pids disabled" "$(listing "${root}/a")" \
-    "b cgroup.controllers cgroup.procs cgroup.subtree_control"
+    "b cgroup.controllers cgroup.kill cgroup.procs cgroup.subtree_control"
 expect_eq "a cgroup.controllers, pids disabled" \
     "$(cat "${root}/a/cgroup.controllers")" ""
 expect_eq "a cgroup.subtree_control" \
@@ -172,7 +172,7 @@ expect_absent "${root}/pids.max"
 expect_eq "a cgroup.controllers, pids enabled" \
     "$(cat "${root}/a/cgroup.controllers")" "pids"
 expect_eq "a listing, pids enabled" "$(listing "${root}/a")" \
-    "b cgroup.controllers cgroup.procs cgroup.subtree_control pids.current pids.max"
+    "b cgroup.controllers cgroup.kill cgroup.procs cgroup.subtree_control pids.current pids.max"
 expect_eq "a pids.max default" "$(cat "${root}/a/pids.max")" "max"
 expect_eq "a pids.current default" "$(cat "${root}/a/pids.current")" "0"
 expect_eq "c pids.max default" "$(cat "${root}/c/pids.max")" "max"
@@ -458,6 +458,105 @@ read -r value <"${root}/a/b/pids.max"
 expect_eq "nested pids.max after controller reset" "${value}" "max"
 write_file "${root}/a/cgroup.subtree_control" "-pids"
 rmdir "${root}/a/b" "${root}/a"
+write_file "${root}/cgroup.subtree_control" "-pids"
+
+echo "--- kill"
+# expect_members <description> <group> <count>: polls cgroup.procs, as
+# signalled processes exit asynchronously.
+expect_members() {
+	tries=0
+	while :; do
+		count=$(grep -c . "$2/cgroup.procs" || true)
+		[ "${count}" = "$3" ] && return 0
+		tries=$((tries + 1))
+		[ "${tries}" -lt 50 ] || break
+		sleep 0.1
+	done
+	fail "$1: ${count} members, expected $3"
+}
+
+write_file "${root}/cgroup.subtree_control" "+pids"
+mkdir "${root}/a" "${root}/a/b" "${root}/c" "${root}/e"
+write_file "${root}/a/cgroup.subtree_control" "+pids"
+expect_absent "${root}/cgroup.kill"
+expect_exists "${root}/a/cgroup.kill"
+expect_error "read cgroup.kill" "Invalid argument" cat "${root}/a/cgroup.kill"
+for value in 0 2 abc; do
+	expect_error "cgroup.kill value ${value}" "Invalid argument" \
+	    write_file "${root}/a/cgroup.kill" "${value}"
+done
+
+# Killing an empty group leaves it open.
+write_file "${root}/e/cgroup.kill" "1"
+spawn_in "${root}/e"
+survivor=$!
+expect_members "join after killing an empty group" "${root}/e" 1
+
+# The whole subtree dies, a sibling survives.
+spawn_in "${root}/a"
+k1=$!
+spawn_in "${root}/a"
+k2=$!
+spawn_in "${root}/a/b"
+k3=$!
+spawn_in "${root}/a/b"
+k4=$!
+spawn_in "${root}/c"
+sibling=$!
+expect_members "a before kill" "${root}/a" 2
+expect_members "a/b before kill" "${root}/a/b" 2
+expect_members "c before kill" "${root}/c" 1
+write_file "${root}/a/cgroup.kill" "1"
+expect_members "a after kill" "${root}/a" 0
+expect_members "a/b after kill" "${root}/a/b" 0
+expect_members "sibling after kill" "${root}/c" 1
+wait "${k1}" "${k2}" "${k3}" "${k4}" || true
+expect_current "a reaped after kill" "${root}/a" 0
+
+# The group opens again once its members are gone.
+try_fork_in "${root}/a" || fail "fork after the killed group emptied"
+
+# A daemonized process has left the fork tree but not the group.
+CG="${root}/a" sh -c \
+    'echo 0 >"$CG/cgroup.procs" && (sleep 60 &) && exit 0' &
+wait $!
+expect_members "orphaned daemon" "${root}/a" 1
+write_file "${root}/a/cgroup.kill" "1"
+expect_members "orphaned daemon after kill" "${root}/a" 0
+expect_current "orphan reaped by init" "${root}/a" 0
+
+# Fork storms: one process keeps forking and reaping, another keeps
+# accumulating children until pids.max stops it.
+write_file "${root}/a/pids.max" "64"
+CG="${root}/a" sh -c \
+    'echo 0 >"$CG/cgroup.procs" && while :; do sh -c "exit 0"; done' \
+    2>/dev/null &
+storm1=$!
+CG="${root}/a/b" sh -c \
+    'echo 0 >"$CG/cgroup.procs" && while :; do sleep 30 & done' \
+    2>/dev/null &
+storm2=$!
+sleep 0.2
+write_file "${root}/a/cgroup.kill" "1"
+expect_members "fork storm after kill" "${root}/a" 0
+expect_members "nested fork storm after kill" "${root}/a/b" 0
+wait "${storm1}" "${storm2}" || true
+expect_current "fork storms reaped" "${root}/a" 0
+write_file "${root}/a/pids.max" "max"
+
+# A removed group's cgroup.kill.
+mkdir "${root}/d"
+exec 3>"${root}/d/cgroup.kill"
+rmdir "${root}/d"
+if printf '1\n' >&3; then
+	fail "kill through a removed group: unexpectedly succeeded"
+fi
+exec 3>&-
+
+kill "${sibling}" "${survivor}"
+wait "${sibling}" "${survivor}" || true
+write_file "${root}/a/cgroup.subtree_control" "-pids"
+rmdir "${root}/a/b" "${root}/a" "${root}/c" "${root}/e"
 write_file "${root}/cgroup.subtree_control" "-pids"
 
 echo "--- leak check"
