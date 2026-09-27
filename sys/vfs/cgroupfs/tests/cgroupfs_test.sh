@@ -1,23 +1,33 @@
 #!/bin/sh
 #
-# cgroupfs skeleton regression test.  Runs as root inside a guest kernel
-# that has cgroupfs compiled in or loadable.
+# cgroupfs regression test.  Runs as root inside a guest kernel that has
+# cgroupfs compiled in or loadable.  The control group tree is global and
+# outlives mounts, so every group created here is removed again.
 
 set -eu
 
 mountpoint=$(mktemp -d /tmp/cgroupfs.XXXXXX)
+other=$(mktemp -d /tmp/cgroupfs.XXXXXX)
 errfile=$(mktemp /tmp/cgroupfs-err.XXXXXX)
 failures=0
 
+is_mounted() {
+	mount | grep -q " on $1 "
+}
+
 cleanup() {
 	exec 3<&- 4<&-
-	for group in a/b a c; do
-		[ -d "${mountpoint}/${group}" ] && rmdir "${mountpoint}/${group}" || true
+	for dir in "${mountpoint}" "${other}"; do
+		is_mounted "${dir}" && umount -f "${dir}" || true
 	done
-	if mount | grep -q " on ${mountpoint} "; then
+	if mount -t cgroupfs cgroupfs "${mountpoint}"; then
+		for group in a/b a c x y z; do
+			[ -d "${mountpoint}/${group}" ] &&
+			    rmdir "${mountpoint}/${group}" || true
+		done
 		umount "${mountpoint}" || true
 	fi
-	rmdir "${mountpoint}" || true
+	rmdir "${mountpoint}" "${other}" || true
 	rm -f "${errfile}"
 }
 trap cleanup EXIT INT TERM
@@ -66,12 +76,16 @@ write_file() {
 	rm -f "${errfile}.dd"
 }
 
-# The malloc type is only listed after its first allocation.
-malloc_inuse() {
-	vmstat -m | awk '$1 == "cgroupfs" { count = $2 } END { print count + 0 }'
+# Allocation count of a malloc type: "cgroup" for the kernel's group
+# objects, "cgroupfs" for filesystem views.  A type is only listed after
+# its first allocation.
+malloc_count() {
+	vmstat -m | awk -v type="$1" \
+	    '$1 == type { count = $2 } END { print count + 0 }'
 }
 
-unmounted_inuse=$(malloc_inuse)
+initial_groups=$(malloc_count cgroup)
+unmounted_views=$(malloc_count cgroupfs)
 mount -t cgroupfs cgroupfs "${mountpoint}"
 root=${mountpoint}
 
@@ -153,7 +167,6 @@ expect_eq "root subtree_control after disable" \
 
 echo "--- rmdir"
 expect_error "rmdir non-empty group" "Device busy" rmdir "${root}/a"
-expect_error "unmount with groups" "Device busy" umount "${mountpoint}"
 rmdir "${root}/a/b"
 rmdir "${root}/a"
 rmdir "${root}/c"
@@ -192,28 +205,88 @@ exec 4<"${root}/cgroup.procs"
 expect_error "unmount with open file" "Device busy" umount "${mountpoint}"
 exec 4<&-
 
-mkdir "${root}/a"
-expect_error "forced unmount with groups" "Device busy" \
-    umount -f "${mountpoint}"
-rmdir "${root}/a"
+echo "--- persistence across mounts"
+mkdir "${root}/a" "${root}/a/b"
+write_file "${root}/cgroup.subtree_control" "+pids"
+umount "${mountpoint}" || fail "unmount with groups"
+mount -t cgroupfs cgroupfs "${mountpoint}"
+expect_eq "root listing after remount" "$(listing "${root}")" \
+    "a cgroup.controllers cgroup.procs cgroup.subtree_control"
+expect_eq "subtree_control after remount" \
+    "$(cat "${root}/cgroup.subtree_control")" "pids"
+expect_eq "a pids.max after remount" "$(cat "${root}/a/pids.max")" "max"
+[ -d "${root}/a/b" ] || fail "a/b lost across remount"
+umount -f "${mountpoint}" || fail "forced unmount with groups"
+mount -t cgroupfs cgroupfs "${mountpoint}"
+[ -d "${root}/a/b" ] || fail "a/b lost across forced unmount"
+rmdir "${root}/a/b" "${root}/a"
+write_file "${root}/cgroup.subtree_control" "-pids"
+
+echo "--- multiple mounts"
+mount -t cgroupfs cgroupfs "${other}"
+expect_eq "second mount listing" "$(listing "${other}")" \
+    "cgroup.controllers cgroup.procs cgroup.subtree_control"
+# Negative entries in one mount must not hide groups created in another.
+expect_absent "${other}/x"
+mkdir "${root}/x"
+[ -d "${other}/x" ] || fail "mkdir not visible in other mount"
+expect_eq "inode across mounts" "$(stat -f %i "${other}/x")" \
+    "$(stat -f %i "${root}/x")"
+# Positive entries must not keep removed groups alive.
+ls "${other}/x" >/dev/null
+rmdir "${root}/x"
+expect_absent "${other}/x"
+mkdir "${other}/x" || fail "recreate in other mount after remote rmdir"
+[ -d "${root}/x" ] || fail "recreated group not visible in first mount"
+rmdir "${other}/x"
+# Controller files flip visibility in every mount.
+mkdir "${root}/y"
+expect_absent "${other}/y/pids.max"
+write_file "${root}/cgroup.subtree_control" "+pids"
+expect_eq "pids.max via other mount" "$(cat "${other}/y/pids.max")" "max"
+expect_eq "subtree_control via other mount" \
+    "$(cat "${other}/cgroup.subtree_control")" "pids"
+stat "${root}/y/pids.max" >/dev/null
+write_file "${other}/cgroup.subtree_control" "-pids"
+expect_absent "${root}/y/pids.max"
+expect_absent "${other}/y/pids.max"
+expect_eq "subtree_control via first mount" \
+    "$(cat "${root}/cgroup.subtree_control")" ""
+rmdir "${other}/y"
+expect_absent "${root}/y"
+# A working directory inside a group removed through another mount.
+mkdir "${root}/z"
+expect_error "lookup in cwd removed via other mount" "" \
+    sh -c "cd '${other}/z' && rmdir '${root}/z' && cat cgroup.procs"
+expect_absent "${root}/z"
+expect_absent "${other}/z"
+umount "${other}" || fail "unmount second mount"
 
 echo "--- leak check"
-baseline=$(malloc_inuse)
+group_baseline=$(malloc_count cgroup)
+view_baseline=$(malloc_count cgroupfs)
+mount -t cgroupfs cgroupfs "${other}"
 iteration=0
 while [ "${iteration}" -lt 50 ]; do
 	mkdir "${root}/a" "${root}/a/b"
 	write_file "${root}/cgroup.subtree_control" "+pids"
-	cat "${root}/a/pids.max" >/dev/null
-	write_file "${root}/cgroup.subtree_control" "-pids"
-	rmdir "${root}/a/b" "${root}/a"
+	cat "${root}/a/pids.max" "${other}/a/b/cgroup.controllers" >/dev/null
+	write_file "${other}/cgroup.subtree_control" "-pids"
+	rmdir "${other}/a/b" "${root}/a"
 	iteration=$((iteration + 1))
 done
-expect_eq "cgroupfs malloc InUse after churn" "$(malloc_inuse)" "${baseline}"
+umount "${other}"
+expect_eq "group count after churn" "$(malloc_count cgroup)" \
+    "${group_baseline}"
+expect_eq "view count after churn" "$(malloc_count cgroupfs)" \
+    "${view_baseline}"
 
 echo "--- unmount"
 umount "${mountpoint}"
-expect_eq "cgroupfs malloc InUse after unmount" "$(malloc_inuse)" \
-    "${unmounted_inuse}"
+expect_eq "group count after unmount" "$(malloc_count cgroup)" \
+    "${initial_groups}"
+expect_eq "view count after unmount" "$(malloc_count cgroupfs)" \
+    "${unmounted_views}"
 
 if [ "${failures}" -ne 0 ]; then
 	echo "cgroupfs: ${failures} failure(s)" >&2

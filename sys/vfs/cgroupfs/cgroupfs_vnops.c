@@ -3,8 +3,8 @@
  *
  * DragonFly cgroupfs: vnode operations.
  *
- * VOPs only adapt arguments; object semantics live in cgroupfs_group.c.
- * Directory vnodes carry a struct cgroupfs_group, regular file vnodes a
+ * VOPs only adapt arguments; object semantics live in cgroupfs_node.c.
+ * Directory vnodes carry a struct cgroupfs_node, regular file vnodes a
  * struct cgroupfs_file.  This is the mount's only vector, so namespace VOPs
  * dispatched through mnt_vn_use_ops need no trampoline.
  */
@@ -23,10 +23,10 @@ static void
 cgroupfs_vnode_attr(struct vnode *vp, ino_t *inodep, mode_t *modep)
 {
 	if (vp->v_type == VDIR) {
-		*inodep = cgroupfs_group_inode(vp->v_data);
+		*inodep = cgroupfs_node_inode(vp->v_data);
 		*modep = CGROUPFS_DIRECTORY_MODE;
 	} else {
-		cgroupfs_group_file_attr(vp->v_data, inodep, modep);
+		cgroupfs_node_file_attr(vp->v_data, inodep, modep);
 	}
 }
 
@@ -72,7 +72,7 @@ cgroupfs_vop_read(struct vop_read_args *ap)
 {
 	if (ap->a_vp->v_type == VDIR)
 		return (EISDIR);
-	return (cgroupfs_group_file_read(ap->a_vp->v_data, ap->a_uio));
+	return (cgroupfs_node_file_read(ap->a_vp->v_data, ap->a_uio));
 }
 
 static int
@@ -80,7 +80,7 @@ cgroupfs_vop_write(struct vop_write_args *ap)
 {
 	if (ap->a_vp->v_type == VDIR)
 		return (EISDIR);
-	return (cgroupfs_group_file_write(ap->a_vp->v_data, ap->a_uio));
+	return (cgroupfs_node_file_write(ap->a_vp->v_data, ap->a_uio));
 }
 
 /*
@@ -125,7 +125,7 @@ cgroupfs_vop_readdir(struct vop_readdir_args *ap)
 		*ap->a_ncookies = 0;
 		*ap->a_cookies = NULL;
 	}
-	error = cgroupfs_group_readdir(ap->a_vp->v_data, ap->a_uio, &eof);
+	error = cgroupfs_node_readdir(ap->a_vp->v_data, ap->a_uio, &eof);
 	if (ap->a_eofflag != NULL)
 		*ap->a_eofflag = eof;
 	return (error);
@@ -138,7 +138,7 @@ cgroupfs_vop_nresolve(struct vop_nresolve_args *ap)
 	struct vnode *vp;
 	int error;
 
-	error = cgroupfs_group_lookup(ap->a_dvp->v_data, ncp->nc_name,
+	error = cgroupfs_node_lookup(ap->a_dvp->v_data, ncp->nc_name,
 	    ncp->nc_nlen, &vp);
 	if (error == 0) {
 		cache_setvp(ap->a_nch, vp);
@@ -158,7 +158,7 @@ cgroupfs_vop_nmkdir(struct vop_nmkdir_args *ap)
 
 	if (ap->a_vap->va_type != VDIR)
 		return (EINVAL);
-	error = cgroupfs_group_mkdir(ap->a_dvp->v_data, nch->ncp->nc_name,
+	error = cgroupfs_node_mkdir(ap->a_dvp->v_data, nch->ncp->nc_name,
 	    nch->ncp->nc_nlen, &vp);
 	if (error != 0)
 		return (error);
@@ -173,32 +173,16 @@ cgroupfs_vop_nmkdir(struct vop_nmkdir_args *ap)
 	return (0);
 }
 
-/*
- * The unlinked entry stays resolved so a working directory inside the
- * removed group still reaches our VOPs (and ENOENT) rather than an
- * unresolvable ncp.  The vnode is recycled once its last user lets go.
- */
 static int
 cgroupfs_vop_nrmdir(struct vop_nrmdir_args *ap)
 {
-	struct nchandle *nch = ap->a_nch;
-	struct vnode *vp;
-	int error;
-
-	error = cgroupfs_group_rmdir(ap->a_dvp->v_data, nch->ncp->nc_name,
-	    nch->ncp->nc_nlen, &vp);
-	if (error != 0)
-		return (error);
-	cache_unlink(nch);
-	cgroupfs_vnode_finalize(vp);
-	vrele(vp);
-	return (0);
+	return (cgroupfs_node_rmdir(ap->a_dvp->v_data, ap->a_nch));
 }
 
 static int
 cgroupfs_vop_nlookupdotdot(struct vop_nlookupdotdot_args *ap)
 {
-	return (cgroupfs_group_lookup_parent(ap->a_dvp->v_data, ap->a_vpp));
+	return (cgroupfs_node_lookup_parent(ap->a_dvp->v_data, ap->a_vpp));
 }
 
 static int
@@ -211,9 +195,9 @@ cgroupfs_vop_inactive(struct vop_inactive_args *ap)
 		return (0);
 	/* A removed group's vnodes are never looked up again. */
 	if (vp->v_type == VDIR)
-		dead = cgroupfs_group_is_dead(vp->v_data);
+		dead = cgroupfs_node_is_dead(vp->v_data);
 	else
-		dead = cgroupfs_group_file_is_dead(vp->v_data);
+		dead = cgroupfs_node_file_is_dead(vp->v_data);
 	if (dead)
 		vrecycle(vp);
 	return (0);
@@ -229,9 +213,9 @@ cgroupfs_vop_reclaim(struct vop_reclaim_args *ap)
 	if (data == NULL)
 		return (0);
 	if (vp->v_type == VDIR)
-		cgroupfs_group_reclaim(data);
+		cgroupfs_node_reclaim(data, vp);
 	else
-		cgroupfs_group_file_reclaim(data, vp);
+		cgroupfs_node_file_reclaim(data, vp);
 	return (0);
 }
 

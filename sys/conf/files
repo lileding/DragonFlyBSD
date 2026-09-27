@@ -1371,6 +1371,7 @@ kern/kern_environment.c	standard
 kern/kern_event.c	standard
 kern/kern_exec.c	standard
 kern/kern_exit.c	standard
+kern/kern_cgroup.c		standard
 kern/kern_fork.c	standard
 kern/kern_jail.c	standard
 kern/kern_kinfo.c	standard
@@ -2002,7 +2003,7 @@ vfs/devfs/devfs_vfsops.c	standard
 vfs/devfs/devfs_helper.c	standard
 vfs/devfs/devfs_rules.c		standard
 vfs/cgroupfs/cgroupfs_file.c	optional cgroupfs
-vfs/cgroupfs/cgroupfs_group.c	optional cgroupfs
+vfs/cgroupfs/cgroupfs_node.c	optional cgroupfs
 vfs/cgroupfs/cgroupfs_vfsops.c	optional cgroupfs
 vfs/cgroupfs/cgroupfs_vnops.c	optional cgroupfs
 vfs/hammer/hammer_blockmap.c	optional hammer
