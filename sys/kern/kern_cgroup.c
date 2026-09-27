@@ -17,6 +17,12 @@
  * fork's read-and-hold of the parent's group is atomic against migration
  * and exit.  A live parent is itself counted in its group, which therefore
  * cannot be destroyed underneath fork.
+ *
+ * pids: each group counts the processes of its subtree, from fork until
+ * reap.  Charging increments every level up to the root and backs out if
+ * any exceeds its limit.  A limit other than unlimited only exists where
+ * the parent enables the pids controller: disabling it resets the
+ * children's limits, and setting one requires it.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -47,6 +53,10 @@ struct cgroup {
 	u_int			refs;
 	/* Live member processes; atomic. */
 	u_int			nprocs;
+	/* Processes of the subtree until reaped; atomic. */
+	u_int			pids;
+	/* Written under the exclusive lock, read locklessly by fork. */
+	u_int			pids_max;
 	/* Written under the exclusive lock; only turns true. */
 	volatile int		dead;
 	uint64_t		id;
@@ -62,6 +72,7 @@ static struct cgroup cgroup_root_group = {
 	.children = RB_INITIALIZER(cgroup_root_group.children),
 	.refs = 1,
 	.id = 0,
+	.pids_max = CGROUP_PIDS_UNLIMITED,
 };
 
 /* Protected by the exclusive hierarchy lock. */
@@ -244,6 +255,7 @@ cgroup_create(struct cgroup *parent, const char *name, size_t namelen,
 	bcopy(name, child->name, namelen);
 	child->name[namelen] = '\0';
 	child->refs = 2;	/* registration and caller */
+	child->pids_max = CGROUP_PIDS_UNLIMITED;
 
 	cgroup_lock_exclusive();
 	if (parent->dead) {
@@ -302,6 +314,7 @@ cgroup_control_update(struct cgroup *cg, uint32_t enable, uint32_t disable,
     bool *changedp)
 {
 	struct cgroup_control control;
+	struct cgroup *child;
 	uint32_t updated;
 	int error;
 
@@ -318,7 +331,94 @@ cgroup_control_update(struct cgroup *cg, uint32_t enable, uint32_t disable,
 	} else {
 		updated = (cg->subtree_control | enable) & ~disable;
 		*changedp = updated != cg->subtree_control;
+		/* A disabled controller forgets the children's limits. */
+		if ((cg->subtree_control & ~updated &
+		    CGROUP_CONTROLLER_PIDS) != 0) {
+			RB_FOREACH(child, cgroup_children, &cg->children)
+				child->pids_max = CGROUP_PIDS_UNLIMITED;
+		}
 		cg->subtree_control = updated;
+		error = 0;
+	}
+	cgroup_unlock();
+	return (error);
+}
+
+/* Adds one process to every level from cg up to, not including, stop. */
+static void
+cgroup_pids_add(struct cgroup *cg, struct cgroup *stop)
+{
+	for (; cg != stop; cg = cg->parent)
+		atomic_add_int(&cg->pids, 1);
+}
+
+static void
+cgroup_pids_sub(struct cgroup *cg, struct cgroup *stop)
+{
+	for (; cg != stop; cg = cg->parent)
+		atomic_add_int(&cg->pids, -1);
+}
+
+/*
+ * Charges one new process to cg and all its ancestors, or none of them if
+ * a level would exceed its limit.  Concurrent charges may both overshoot
+ * transiently and back out, as Linux's pids_try_charge() does.
+ */
+static int
+cgroup_pids_try_charge(struct cgroup *cg)
+{
+	struct cgroup *level;
+
+	for (level = cg; level != NULL; level = level->parent) {
+		if (atomic_fetchadd_int(&level->pids, 1) + 1 >
+		    level->pids_max) {
+			cgroup_pids_sub(cg, level->parent);
+			return (EAGAIN);
+		}
+	}
+	return (0);
+}
+
+/* Caller holds the hierarchy lock, which pins both ancestries. */
+static struct cgroup *
+cgroup_common_ancestor(struct cgroup *left, struct cgroup *right)
+{
+	struct cgroup *a;
+	struct cgroup *b;
+
+	for (a = left; a != NULL; a = a->parent) {
+		for (b = right; b != NULL; b = b->parent) {
+			if (a == b)
+				return (a);
+		}
+	}
+	panic("cgroup: groups %p and %p share no root", left, right);
+}
+
+u_int
+cgroup_pids_current(const struct cgroup *cg)
+{
+	/* An aligned word read; a snapshot is all readers need. */
+	return (cg->pids);
+}
+
+u_int
+cgroup_pids_max(const struct cgroup *cg)
+{
+	return (cg->pids_max);
+}
+
+int
+cgroup_pids_set_max(struct cgroup *cg, u_int max)
+{
+	int error;
+
+	cgroup_lock_exclusive();
+	if (cg->dead || cg->parent == NULL ||
+	    (cg->parent->subtree_control & CGROUP_CONTROLLER_PIDS) == 0) {
+		error = ENOENT;
+	} else {
+		cg->pids_max = max;
 		error = 0;
 	}
 	cgroup_unlock();
@@ -333,6 +433,7 @@ cgroup_proc_init0(struct proc *p)
 	KKASSERT(p->p_cgroup == NULL);
 	cgroup_hold(root);
 	atomic_add_int(&root->nprocs, 1);
+	cgroup_pids_add(root, NULL);
 	p->p_cgroup = root;
 }
 
@@ -340,12 +441,16 @@ int
 cgroup_proc_fork(struct proc *parent, struct cgroup **cgp)
 {
 	struct cgroup *cg;
+	int error;
 
 	/* Nothing below blocks, so parent's p_token stays held throughout. */
 	if (parent->p_flags & P_WEXIT)
 		return (EAGAIN);
 	cg = parent->p_cgroup;
 	KKASSERT(cg != NULL);
+	error = cgroup_pids_try_charge(cg);
+	if (error != 0)
+		return (error);
 	cgroup_hold(cg);
 	atomic_add_int(&cg->nprocs, 1);
 	*cgp = cg;
@@ -365,6 +470,8 @@ cgroup_proc_reap(struct proc *p)
 	struct cgroup *cg = p->p_cgroup;
 
 	p->p_cgroup = NULL;
+	/* A removed group's parent chain stays valid while it is held. */
+	cgroup_pids_sub(cg, NULL);
 	cgroup_drop(cg);
 }
 
@@ -376,6 +483,7 @@ cgroup_proc_reap(struct proc *p)
 int
 cgroup_proc_migrate(struct cgroup *cg, pid_t pid, struct ucred *cred)
 {
+	struct cgroup *common;
 	struct cgroup *old;
 	struct proc *p;
 	int error;
@@ -406,6 +514,14 @@ cgroup_proc_migrate(struct cgroup *cg, pid_t pid, struct ucred *cred)
 			error = ESRCH;
 		} else if (p->p_cgroup != cg) {
 			old = p->p_cgroup;
+			/*
+			 * Move the pids charge exactly: only the levels below
+			 * the common ancestor change, so no level ever over-
+			 * or under-counts.  Migration is not limited.
+			 */
+			common = cgroup_common_ancestor(old, cg);
+			cgroup_pids_sub(old, common);
+			cgroup_pids_add(cg, common);
 			cgroup_hold(cg);
 			atomic_add_int(&cg->nprocs, 1);
 			p->p_cgroup = cg;

@@ -38,24 +38,26 @@ static int cgroupfs_load_procs(struct cgroup *, const struct cgroup_control *,
 	struct sbuf *);
 static int cgroupfs_load_subtree_control(struct cgroup *,
 	const struct cgroup_control *, struct sbuf *);
-static int cgroupfs_load_max(struct cgroup *, const struct cgroup_control *,
-	struct sbuf *);
-static int cgroupfs_load_zero(struct cgroup *, const struct cgroup_control *,
-	struct sbuf *);
+static int cgroupfs_load_pids_current(struct cgroup *,
+	const struct cgroup_control *, struct sbuf *);
+static int cgroupfs_load_pids_max(struct cgroup *,
+	const struct cgroup_control *, struct sbuf *);
 static int cgroupfs_store_procs(struct cgroup *, const char *, size_t,
 	struct ucred *, bool *);
 static int cgroupfs_store_subtree_control(struct cgroup *, const char *,
 	size_t, struct ucred *, bool *);
+static int cgroupfs_store_pids_max(struct cgroup *, const char *, size_t,
+	struct ucred *, bool *);
 
 static const struct cgroupfs_file_desc cgroupfs_files[] = {
 	{ "cgroup.controllers", 0444, 0, cgroupfs_load_controllers, NULL },
 	{ "cgroup.procs", 0644, 0, cgroupfs_load_procs, cgroupfs_store_procs },
 	{ "cgroup.subtree_control", 0644, 0, cgroupfs_load_subtree_control,
 	    cgroupfs_store_subtree_control },
-	{ "pids.current", 0444, CGROUP_CONTROLLER_PIDS, cgroupfs_load_zero,
-	    NULL },
-	{ "pids.max", 0444, CGROUP_CONTROLLER_PIDS, cgroupfs_load_max,
-	    NULL },
+	{ "pids.current", 0444, CGROUP_CONTROLLER_PIDS,
+	    cgroupfs_load_pids_current, NULL },
+	{ "pids.max", 0644, CGROUP_CONTROLLER_PIDS, cgroupfs_load_pids_max,
+	    cgroupfs_store_pids_max },
 };
 
 CTASSERT(nitems(cgroupfs_files) == CGROUPFS_FILE_COUNT);
@@ -180,23 +182,55 @@ cgroupfs_load_procs(struct cgroup *cg, const struct cgroup_control *control,
 }
 
 static int
-cgroupfs_load_max(struct cgroup *cg, const struct cgroup_control *control,
-    struct sbuf *sb)
+cgroupfs_load_pids_current(struct cgroup *cg,
+    const struct cgroup_control *control, struct sbuf *sb)
 {
-	(void)cg;
 	(void)control;
-	sbuf_printf(sb, "max\n");
+	sbuf_printf(sb, "%u\n", cgroup_pids_current(cg));
 	return (0);
 }
 
 static int
-cgroupfs_load_zero(struct cgroup *cg, const struct cgroup_control *control,
+cgroupfs_load_pids_max(struct cgroup *cg, const struct cgroup_control *control,
     struct sbuf *sb)
 {
-	(void)cg;
+	u_int max;
+
 	(void)control;
-	sbuf_printf(sb, "0\n");
+	max = cgroup_pids_max(cg);
+	if (max == CGROUP_PIDS_UNLIMITED)
+		sbuf_printf(sb, "max\n");
+	else
+		sbuf_printf(sb, "%u\n", max);
 	return (0);
+}
+
+/* "max" or a decimal count up to INT_MAX, optionally newline terminated. */
+static int
+cgroupfs_store_pids_max(struct cgroup *cg, const char *buffer, size_t length,
+    struct ucred *cred, bool *changedp)
+{
+	u_int max;
+	size_t position;
+
+	(void)cred;
+	(void)changedp;
+	if (length > 0 && buffer[length - 1] == '\n')
+		--length;
+	if (length == sizeof("max") - 1 &&
+	    bcmp(buffer, "max", sizeof("max") - 1) == 0)
+		return (cgroup_pids_set_max(cg, CGROUP_PIDS_UNLIMITED));
+	if (length == 0)
+		return (EINVAL);
+	max = 0;
+	for (position = 0; position < length; ++position) {
+		if (buffer[position] < '0' || buffer[position] > '9')
+			return (EINVAL);
+		max = max * 10 + (buffer[position] - '0');
+		if (max > INT_MAX)
+			return (EINVAL);
+	}
+	return (cgroup_pids_set_max(cg, max));
 }
 
 /*

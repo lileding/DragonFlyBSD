@@ -17,6 +17,12 @@ is_mounted() {
 
 cleanup() {
 	exec 3<&- 4<&-
+	# Leave any limited group first.  Only write through a mounted view:
+	# on a bare directory the redirection would create a file.
+	for dir in "${mountpoint}" "${other}"; do
+		is_mounted "${dir}" || continue
+		printf '%s\n' "$$" >"${dir}/cgroup.procs" 2>/dev/null && break
+	done
 	for dir in "${mountpoint}" "${other}"; do
 		is_mounted "${dir}" && umount -f "${dir}" || true
 	done
@@ -84,6 +90,17 @@ write_file() {
 	printf '%s\n' "$2" | dd of="$1" 2>"${errfile}.dd" ||
 	    { cat "${errfile}.dd" >&2; rm -f "${errfile}.dd"; return 1; }
 	rm -f "${errfile}.dd"
+}
+
+# unmount_checked <mountpoint>: on failure, show who still uses the
+# filesystem before recording it.
+unmount_checked() {
+	if ! umount "$1" 2>"${errfile}"; then
+		cat "${errfile}" >&2
+		fstat -f "$1" >&2 || true
+		fail "unmount $1"
+		return 1
+	fi
 }
 
 # Allocation count of a malloc type: "cgroup" for the kernel's group
@@ -271,7 +288,7 @@ expect_error "lookup in cwd removed via other mount" "" \
     sh -c "cd '${other}/z' && rmdir '${root}/z' && cat cgroup.procs"
 expect_absent "${root}/z"
 expect_absent "${other}/z"
-umount "${other}" || fail "unmount second mount"
+unmount_checked "${other}" || true
 
 echo "--- membership"
 mkdir "${root}/a" "${root}/b"
@@ -320,6 +337,129 @@ expect_not_member "${root}/a" "$$"
 rmdir "${root}/a" || fail "rmdir after members left"
 rmdir "${root}/b" || fail "rmdir after subshell exited"
 
+echo "--- pids"
+# A shell that fails to fork exits, so this shell never joins a limited
+# group: workers join groups themselves and report through exit status.
+
+# spawn_in <group>: a background process living in the group.
+spawn_in() {
+	CG="$1" sh -c 'echo 0 >"$CG/cgroup.procs" && exec sleep 60' &
+}
+
+# try_fork_in <group>: succeeds iff a process in the group can fork.
+try_fork_in() {
+	# The trailing exit keeps sh from exec'ing the last command in place
+	# of forking it.
+	CG="$1" sh -c 'echo 0 >"$CG/cgroup.procs" && sh -c true && exit 0' \
+	    2>/dev/null
+}
+
+# expect_current <description> <group> <value>: joins and reaps are
+# asynchronous, so poll for up to five seconds.
+expect_current() {
+	tries=0
+	while :; do
+		read -r value <"$2/pids.current"
+		[ "${value}" = "$3" ] && return 0
+		tries=$((tries + 1))
+		[ "${tries}" -lt 50 ] || break
+		sleep 0.1
+	done
+	fail "$1: pids.current ${value}, expected $3"
+}
+
+write_file "${root}/cgroup.subtree_control" "+pids"
+mkdir "${root}/a" "${root}/a/b" "${root}/a/z"
+write_file "${root}/a/cgroup.subtree_control" "+pids"
+expect_current "empty group" "${root}/a" 0
+read -r value <"${root}/a/pids.max"
+expect_eq "default pids.max" "${value}" "max"
+expect_error "negative pids.max" "Invalid argument" \
+    write_file "${root}/a/pids.max" "-1"
+expect_error "malformed pids.max" "Invalid argument" \
+    write_file "${root}/a/pids.max" "abc"
+write_file "${root}/a/pids.max" "10"
+read -r value <"${root}/a/pids.max"
+expect_eq "numeric pids.max" "${value}" "10"
+write_file "${root}/a/pids.max" "max"
+read -r value <"${root}/a/pids.max"
+expect_eq "pids.max back to max" "${value}" "max"
+
+spawn_in "${root}/a"
+first=$!
+spawn_in "${root}/a"
+second=$!
+expect_current "two members" "${root}/a" 2
+# A worker joining makes 3; its fork would make 4.
+write_file "${root}/a/pids.max" "3"
+if try_fork_in "${root}/a"; then
+	fail "fork beyond pids.max succeeded"
+fi
+expect_current "refused fork backed out" "${root}/a" 2
+write_file "${root}/a/pids.max" "4"
+try_fork_in "${root}/a" || fail "fork within pids.max failed"
+expect_current "after a successful fork" "${root}/a" 2
+
+# Hierarchy: b is unlimited but lives under a.
+spawn_in "${root}/a/b"
+third=$!
+expect_current "b member" "${root}/a/b" 1
+expect_current "a counts b" "${root}/a" 3
+if try_fork_in "${root}/a/b"; then
+	fail "fork in b beyond a's pids.max succeeded"
+fi
+expect_current "refused nested fork backed out" "${root}/a" 3
+
+# Migration is not limited: a is at 3 of 3.
+write_file "${root}/a/pids.max" "3"
+sleep 60 &
+outsider=$!
+write_file "${root}/a/cgroup.procs" "${outsider}" ||
+    fail "migration into a full group"
+expect_current "over the limit by migration" "${root}/a" 4
+
+write_file "${root}/a/pids.max" "max"
+kill "${first}" "${second}" "${third}" "${outsider}"
+wait "${first}" "${second}" "${third}" "${outsider}" || true
+expect_current "after cleanup" "${root}/a" 0
+
+# A zombie counts until reaped but is not a listed member.
+CG="${root}/a/z" sh -c \
+    'echo 0 >"$CG/cgroup.procs" && { sleep 0 & exec sleep 3; }' &
+holder=$!
+expect_current "zombie counted" "${root}/a/z" 2
+expect_eq "zombie not listed" "$(grep -c . "${root}/a/z/cgroup.procs")" "1"
+wait "${holder}" || true
+expect_current "zombie released" "${root}/a/z" 0
+
+# A group holding only a zombie can be removed; its ancestors still count
+# the zombie until it is reaped.
+CG="${root}/a/z" sh -c \
+    'sh -c "echo 0 >\"\$CG/cgroup.procs\"" & exec sleep 3' &
+holder=$!
+expect_current "only a zombie left" "${root}/a/z" 1
+expect_eq "zombie-only group lists nothing" \
+    "$(cat "${root}/a/z/cgroup.procs")" ""
+rmdir "${root}/a/z" || fail "rmdir of a group holding only a zombie"
+expect_current "ancestor counts the removed group's zombie" "${root}/a" 1
+wait "${holder}" || true
+expect_current "ancestor released the zombie" "${root}/a" 0
+
+# Disabling the controller resets the children's limits.
+write_file "${root}/a/pids.max" "5"
+write_file "${root}/a/b/pids.max" "7"
+write_file "${root}/a/cgroup.subtree_control" "-pids"
+write_file "${root}/cgroup.subtree_control" "-pids"
+write_file "${root}/cgroup.subtree_control" "+pids"
+write_file "${root}/a/cgroup.subtree_control" "+pids"
+read -r value <"${root}/a/pids.max"
+expect_eq "pids.max after controller reset" "${value}" "max"
+read -r value <"${root}/a/b/pids.max"
+expect_eq "nested pids.max after controller reset" "${value}" "max"
+write_file "${root}/a/cgroup.subtree_control" "-pids"
+rmdir "${root}/a/b" "${root}/a"
+write_file "${root}/cgroup.subtree_control" "-pids"
+
 echo "--- leak check"
 group_baseline=$(malloc_count cgroup)
 view_baseline=$(malloc_count cgroupfs)
@@ -339,14 +479,14 @@ while [ "${iteration}" -lt 50 ]; do
 	rmdir "${other}/a/b" "${root}/a"
 	iteration=$((iteration + 1))
 done
-umount "${other}"
+unmount_checked "${other}" || true
 expect_eq "group count after churn" "$(malloc_count cgroup)" \
     "${group_baseline}"
 expect_eq "view count after churn" "$(malloc_count cgroupfs)" \
     "${view_baseline}"
 
 echo "--- unmount"
-umount "${mountpoint}"
+unmount_checked "${mountpoint}" || true
 expect_eq "group count after unmount" "$(malloc_count cgroup)" \
     "${initial_groups}"
 expect_eq "view count after unmount" "$(malloc_count cgroupfs)" \

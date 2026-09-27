@@ -13,12 +13,16 @@
 #endif
 
 #include <sys/types.h>
+#include <machine/limits.h>
 
 struct cgroup;
 struct proc;
 struct ucred;
 
 #define CGROUP_CONTROLLER_PIDS	0x00000001U
+
+/* pids.max value meaning "max": no limit. */
+#define CGROUP_PIDS_UNLIMITED	UINT_MAX
 
 struct cgroup_controller {
 	const char	*name;
@@ -104,6 +108,17 @@ void		cgroup_proc_exit(struct proc *);
 void		cgroup_proc_reap(struct proc *);
 /* Moves process pid (0: the caller) into the group. */
 int		cgroup_proc_migrate(struct cgroup *, pid_t, struct ucred *);
+/*
+ * pids controller.  current counts the processes of the whole subtree,
+ * including forks in progress and unreaped zombies.  A fork fails with
+ * EAGAIN when any group from the child's up to the root would exceed its
+ * max; migration moves the count without checking.  set_max requires the
+ * parent to have the controller enabled (ENOENT otherwise).
+ */
+u_int		cgroup_pids_current(const struct cgroup *);
+u_int		cgroup_pids_max(const struct cgroup *);
+int		cgroup_pids_set_max(struct cgroup *, u_int);
+
 /* Live members' pids; free the array with cgroup_procs_free(). */
 void		cgroup_procs_snapshot(struct cgroup *, pid_t **, u_int *);
 void		cgroup_procs_free(pid_t *);
