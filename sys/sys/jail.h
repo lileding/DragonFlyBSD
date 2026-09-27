@@ -109,6 +109,7 @@ struct jail_ip_storage {
  */
 struct sysctl_ctx_list;
 struct sysctl_oid;
+struct cgroup;
 
 struct prison {
 	LIST_ENTRY(prison) pr_list;			/* all prisons */
@@ -129,6 +130,7 @@ struct prison {
 	struct sysctl_oid *pr_sysctl_tree;
 
 	prison_cap_t	pr_caps;			/* Prison capabilities */
+	struct cgroup	*pr_cgroup;			/* pinned control group */
 };
 
 /*

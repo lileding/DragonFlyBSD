@@ -118,7 +118,18 @@ void		cgroup_proc_reap(struct proc *);
  */
 int		cgroup_kill(struct cgroup *);
 
-/* Moves process pid (0: the caller) into the group. */
+/*
+ * Jails: a prison pins its creator's group, which cannot be destroyed
+ * while pinned.  pin_current returns the calling process's group, held
+ * and pinned; unpin takes no lock.
+ */
+struct cgroup	*cgroup_pin_current(void);
+void		cgroup_unpin(struct cgroup *);
+
+/*
+ * Moves process pid (0: the caller) into the group.  A jailed process
+ * may only move within its prison's group subtree (EPERM otherwise).
+ */
 int		cgroup_proc_migrate(struct cgroup *, pid_t, struct ucred *);
 /*
  * pids controller.  current counts the processes of the whole subtree,

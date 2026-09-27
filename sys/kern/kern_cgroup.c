@@ -36,6 +36,8 @@
 #include <sys/systm.h>
 #include <sys/cgroup.h>
 #include <sys/kernel.h>
+#include <sys/socket.h>		/* struct prison embeds sockaddr_storage */
+#include <sys/jail.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/proc.h>
@@ -70,6 +72,8 @@ struct cgroup {
 	struct lock		gate;
 	/* Set by kill, cleared when nlive drops to zero; atomic. */
 	volatile u_int		closed;
+	/* Prisons whose group this is; atomic. */
+	u_int			pins;
 	/* Written under the exclusive lock, read locklessly by fork. */
 	u_int			pids_max;
 	/* Written under the exclusive lock; only turns true. */
@@ -313,7 +317,8 @@ cgroup_destroy(struct cgroup *parent, const char *name, size_t namelen,
 	} else if ((child = cgroup_child_find(parent, name, namelen)) ==
 	    NULL) {
 		error = ENOENT;
-	} else if (!RB_EMPTY(&child->children) || child->nprocs != 0) {
+	} else if (!RB_EMPTY(&child->children) || child->nprocs != 0 ||
+	    child->pins != 0) {
 		error = EBUSY;
 	} else {
 		RB_REMOVE(cgroup_children, &parent->children, child);
@@ -417,6 +422,17 @@ cgroup_pids_try_charge(struct cgroup *cg)
 		}
 	}
 	return (0);
+}
+
+/* Whether g is top or one of its descendants. */
+static bool
+cgroup_is_within(struct cgroup *g, struct cgroup *top)
+{
+	for (; g != NULL; g = g->parent) {
+		if (g == top)
+			return (true);
+	}
+	return (false);
 }
 
 /* Caller holds the hierarchy lock, which pins both ancestries. */
@@ -596,6 +612,10 @@ cgroup_proc_migrate(struct cgroup *cg, pid_t pid, struct ucred *cred)
 		} else if (p->p_stat == SIDL) {
 			/* Its fork still holds the gate of its group. */
 			error = EBUSY;
+		} else if (p->p_ucred->cr_prison != NULL &&
+		    !cgroup_is_within(cg, p->p_ucred->cr_prison->pr_cgroup)) {
+			/* A jail's processes stay in its group's subtree. */
+			error = EPERM;
 		} else if (p->p_cgroup != cg &&
 		    (p->p_cgroup->closed || cg->closed)) {
 			/* Neither escaping nor joining a group being killed. */
@@ -757,4 +777,29 @@ cgroup_kill(struct cgroup *cg)
 	cgroup_unlock();
 	kfree(groups, M_CGROUP);
 	return (0);
+}
+
+/*
+ * The caller is a live member of its group, so the group cannot be
+ * destroyed before the pin is counted.
+ */
+struct cgroup *
+cgroup_pin_current(void)
+{
+	struct proc *p = curproc;
+	struct cgroup *cg;
+
+	lwkt_gettoken(&p->p_token);
+	cg = p->p_cgroup;
+	cgroup_hold(cg);
+	atomic_add_int(&cg->pins, 1);
+	lwkt_reltoken(&p->p_token);
+	return (cg);
+}
+
+void
+cgroup_unpin(struct cgroup *cg)
+{
+	atomic_add_int(&cg->pins, -1);
+	cgroup_drop(cg);
 }

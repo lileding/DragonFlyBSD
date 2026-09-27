@@ -28,7 +28,7 @@ cleanup() {
 	done
 	if mount -t cgroupfs cgroupfs "${mountpoint}"; then
 		printf '%s\n' "$$" >"${mountpoint}/cgroup.procs" || true
-		for group in a/b a/z a b c d e x y z; do
+		for group in a/b a/z a b c d e j/sub j x y z; do
 			[ -d "${mountpoint}/${group}" ] &&
 			    rmdir "${mountpoint}/${group}" || true
 		done
@@ -558,6 +558,73 @@ wait "${sibling}" "${survivor}" || true
 write_file "${root}/a/cgroup.subtree_control" "-pids"
 rmdir "${root}/a/b" "${root}/a" "${root}/c" "${root}/e"
 write_file "${root}/cgroup.subtree_control" "-pids"
+
+echo "--- jail"
+# jail_id <hostname>: the jid of a running jail, or nothing.
+jail_id() {
+	jls | awk -v host="$1" '$2 == host { print $1 }'
+}
+
+# expect_jail <description> <hostname> <present: yes|no>: prisons go away
+# when the last credential referencing them is released, so poll.
+expect_jail() {
+	tries=0
+	while :; do
+		jid=$(jail_id "$2")
+		[ -n "${jid}" ] && present=yes || present=no
+		[ "${present}" = "$3" ] && return 0
+		tries=$((tries + 1))
+		[ "${tries}" -lt 50 ] || break
+		sleep 0.1
+	done
+	fail "$1: jail $2 present=${present}, expected $3"
+}
+
+mkdir "${root}/j" "${root}/j/sub"
+# The jail is created from inside j, so j becomes the jail's group.
+CG="${root}/j" sh -c \
+    'echo 0 >"$CG/cgroup.procs" && exec jail / cgtest 127.0.0.1 /bin/sleep 60' &
+jailed=$!
+expect_jail "jail started" cgtest yes
+expect_members "jail's first process" "${root}/j" 1
+expect_member "${root}/j" "${jailed}"
+
+# jexec from the root group joins the jail's group, as docker exec does.
+jexec "$(jail_id cgtest)" /bin/sleep 60 &
+execd=$!
+expect_members "jexec joins the jail's group" "${root}/j" 2
+expect_member "${root}/j" "${execd}"
+
+# Jailed processes stay within the jail's subtree, even for the host.
+expect_error "jailed process out of the jail's subtree" \
+    "Operation not permitted" write_file "${root}/cgroup.procs" "${execd}"
+expect_member "${root}/j" "${execd}"
+write_file "${root}/j/sub/cgroup.procs" "${execd}" ||
+    fail "jailed process within the jail's subtree"
+expect_member "${root}/j/sub" "${execd}"
+
+# Killing the jail's group takes the whole jail down.
+write_file "${root}/j/cgroup.kill" "1"
+expect_members "jail's group after kill" "${root}/j" 0
+expect_members "jail's nested group after kill" "${root}/j/sub" 0
+wait "${jailed}" "${execd}" || true
+expect_jail "jail gone after kill" cgtest no
+rmdir "${root}/j/sub"
+
+# A zombie still references its prison, which keeps the group pinned.  Its
+# parent stays in the root group and never reaps (sh reaps any child when
+# it waits, so this shell must not be the parent).
+CG="${root}/j" sh -c \
+    'sh -c "echo 0 >\"\$CG/cgroup.procs\" &&
+    exec jail / cgpin 127.0.0.1 /usr/bin/true" & exec sleep 5' &
+pinned=$!
+expect_jail "pinning jail started" cgpin yes
+expect_members "pinning jail's process exited" "${root}/j" 0
+expect_jail "zombie keeps the prison" cgpin yes
+expect_error "rmdir of a jail's group" "Device busy" rmdir "${root}/j"
+wait "${pinned}" || true
+expect_jail "prison released with the zombie" cgpin no
+rmdir "${root}/j" || fail "rmdir after the jail went away"
 
 echo "--- leak check"
 group_baseline=$(malloc_count cgroup)

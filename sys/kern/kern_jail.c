@@ -41,6 +41,7 @@
 #include "opt_inet6.h"
 
 #include <sys/param.h>
+#include <sys/cgroup.h>
 #include <sys/types.h>
 #include <sys/kernel.h>
 #include <sys/systm.h>
@@ -144,6 +145,14 @@ kern_jail_attach(int jid)
 	if (pr == NULL)
 		return(EINVAL);
 
+	/*
+	 * Join the jail's control group first, like docker exec; this fails
+	 * without side effects while the group is being killed.
+	 */
+	error = cgroup_proc_migrate(pr->pr_cgroup, 0, curthread->td_ucred);
+	if (error)
+		return(error);
+
 	error = kern_chroot(&pr->pr_root);
 	if (error)
 		return(error);
@@ -224,6 +233,12 @@ kern_jail(struct prison *pr, struct jail *j)
 	if (error)
 		goto out;
 
+	/*
+	 * The jail lives in its creator's control group: attaching moves
+	 * every process that joins the jail there, and the group cannot be
+	 * removed while the prison exists.
+	 */
+	pr->pr_cgroup = cgroup_pin_current();
 	error = kern_jail_attach(pr->pr_id);
 	if (error)
 		goto out2;
@@ -232,6 +247,8 @@ kern_jail(struct prison *pr, struct jail *j)
 	return 0;
 
 out2:
+	cgroup_unpin(pr->pr_cgroup);
+	pr->pr_cgroup = NULL;
 	prison_sysctl_done(pr);
 
 out:
@@ -818,6 +835,10 @@ prison_free(struct prison *pr)
 		kfree(jls, M_PRISON);
 	}
 	lockmgr(&jail_lock, LK_RELEASE);
+
+	/* Unpinning takes no lock. */
+	if (pr->pr_cgroup != NULL)
+		cgroup_unpin(pr->pr_cgroup);
 
 	if (pr->pr_linux != NULL)
 		kfree(pr->pr_linux, M_PRISON);
