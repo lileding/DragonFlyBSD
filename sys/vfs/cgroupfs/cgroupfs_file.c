@@ -29,6 +29,8 @@ struct cgroupfs_file_desc {
 	uint32_t		controller;
 	/* Absent from the root group. */
 	bool			nonroot;
+	/* Supports change notification through kqueue and poll. */
+	bool			notify;
 	cgroupfs_file_load_t	load;
 	/* NULL exactly when the mode grants no write access. */
 	cgroupfs_file_store_t	store;
@@ -37,6 +39,8 @@ struct cgroupfs_file_desc {
 static int cgroupfs_load_controllers(struct cgroup *,
 	const struct cgroup_control *, struct sbuf *);
 static int cgroupfs_load_unreadable(struct cgroup *,
+	const struct cgroup_control *, struct sbuf *);
+static int cgroupfs_load_events(struct cgroup *,
 	const struct cgroup_control *, struct sbuf *);
 static int cgroupfs_load_procs(struct cgroup *, const struct cgroup_control *,
 	struct sbuf *);
@@ -56,17 +60,19 @@ static int cgroupfs_store_pids_max(struct cgroup *, const char *, size_t,
 	struct ucred *, bool *);
 
 static const struct cgroupfs_file_desc cgroupfs_files[] = {
-	{ "cgroup.controllers", 0444, 0, false, cgroupfs_load_controllers,
-	    NULL },
-	{ "cgroup.kill", 0200, 0, true, cgroupfs_load_unreadable,
-	    cgroupfs_store_kill },
-	{ "cgroup.procs", 0644, 0, false, cgroupfs_load_procs,
-	    cgroupfs_store_procs },
-	{ "cgroup.subtree_control", 0644, 0, false,
+	{ "cgroup.controllers", 0444, 0, false, false,
+	    cgroupfs_load_controllers, NULL },
+	{ "cgroup.events", 0444, 0, true, true,
+	    cgroupfs_load_events, NULL },
+	{ "cgroup.kill", 0200, 0, true, false,
+	    cgroupfs_load_unreadable, cgroupfs_store_kill },
+	{ "cgroup.procs", 0644, 0, false, false,
+	    cgroupfs_load_procs, cgroupfs_store_procs },
+	{ "cgroup.subtree_control", 0644, 0, false, false,
 	    cgroupfs_load_subtree_control, cgroupfs_store_subtree_control },
-	{ "pids.current", 0444, CGROUP_CONTROLLER_PIDS, true,
+	{ "pids.current", 0444, CGROUP_CONTROLLER_PIDS, true, false,
 	    cgroupfs_load_pids_current, NULL },
-	{ "pids.max", 0644, CGROUP_CONTROLLER_PIDS, true,
+	{ "pids.max", 0644, CGROUP_CONTROLLER_PIDS, true, false,
 	    cgroupfs_load_pids_max, cgroupfs_store_pids_max },
 };
 
@@ -84,6 +90,13 @@ cgroupfs_file_mode(u_int index)
 {
 	KKASSERT(index < nitems(cgroupfs_files));
 	return (cgroupfs_files[index].mode);
+}
+
+bool
+cgroupfs_file_notifies(u_int index)
+{
+	KKASSERT(index < nitems(cgroupfs_files));
+	return (cgroupfs_files[index].notify);
 }
 
 int
@@ -167,6 +180,15 @@ cgroupfs_load_controllers(struct cgroup *cg,
 {
 	(void)cg;
 	return (cgroupfs_format_mask(control->available, sb));
+}
+
+static int
+cgroupfs_load_events(struct cgroup *cg, const struct cgroup_control *control,
+    struct sbuf *sb)
+{
+	(void)control;
+	sbuf_printf(sb, "populated %d\n", cgroup_events_populated(cg) ? 1 : 0);
+	return (0);
 }
 
 /* Write-only files. */

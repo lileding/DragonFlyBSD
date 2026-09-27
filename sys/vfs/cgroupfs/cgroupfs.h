@@ -18,6 +18,7 @@
 
 struct cgroup;
 struct cgroup_control;
+struct knote;
 struct mount;
 struct nchandle;
 struct sbuf;
@@ -77,6 +78,7 @@ void	cgroupfs_node_file_attr(const struct cgroupfs_file *, ino_t *,
 int	cgroupfs_node_file_read(struct cgroupfs_file *, struct uio *);
 int	cgroupfs_node_file_write(struct cgroupfs_file *, struct uio *,
 	    struct ucred *);
+int	cgroupfs_node_file_kqfilter(struct cgroupfs_file *, struct knote *);
 bool	cgroupfs_node_file_is_dead(const struct cgroupfs_file *);
 void	cgroupfs_node_file_reclaim(struct cgroupfs_file *, struct vnode *);
 
@@ -88,12 +90,14 @@ void	cgroupfs_vnode_finalize(struct vnode *);
  * text and the kernel's control group interface.
  */
 
-#define CGROUPFS_FILE_COUNT	6
+#define CGROUPFS_FILE_COUNT	7
 /* Largest accepted write. */
 #define CGROUPFS_FILE_SIZE_MAX	128
 
 const char	*cgroupfs_file_name(u_int);
 mode_t		cgroupfs_file_mode(u_int);
+/* Whether the file reports changes (cgroup.events). */
+bool		cgroupfs_file_notifies(u_int);
 /* Index of the interface file with this name, or -1. */
 int		cgroupfs_file_find(const char *, size_t);
 bool		cgroupfs_file_present(u_int, const struct cgroup_control *);

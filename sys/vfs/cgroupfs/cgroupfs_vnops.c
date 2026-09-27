@@ -114,6 +114,14 @@ cgroupfs_vop_setattr(struct vop_setattr_args *ap)
 }
 
 static int
+cgroupfs_vop_kqfilter(struct vop_kqfilter_args *ap)
+{
+	if (ap->a_vp->v_type != VREG)
+		return (EOPNOTSUPP);
+	return (cgroupfs_node_file_kqfilter(ap->a_vp->v_data, ap->a_kn));
+}
+
+static int
 cgroupfs_vop_readdir(struct vop_readdir_args *ap)
 {
 	int eof;
@@ -230,6 +238,7 @@ struct vop_ops cgroupfs_vnode_vops = {
 	.vop_close =		vop_stdclose,
 	.vop_getattr =		cgroupfs_vop_getattr,
 	.vop_inactive =		cgroupfs_vop_inactive,
+	.vop_kqfilter =		cgroupfs_vop_kqfilter,
 	.vop_ncreate =		(void *)vop_eopnotsupp,
 	.vop_nlink =		(void *)vop_eopnotsupp,
 	.vop_nlookupdotdot =	cgroupfs_vop_nlookupdotdot,

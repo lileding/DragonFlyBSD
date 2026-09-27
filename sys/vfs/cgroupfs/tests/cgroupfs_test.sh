@@ -6,6 +6,9 @@
 
 set -eu
 
+# The notification helper built from tests/cgwait.c.
+CGWAIT=${CGWAIT:-/root/cgwait}
+
 mountpoint=$(mktemp -d /tmp/cgroupfs.XXXXXX)
 other=$(mktemp -d /tmp/cgroupfs.XXXXXX)
 errfile=$(mktemp /tmp/cgroupfs-err.XXXXXX)
@@ -146,7 +149,7 @@ expect_error "mkdir existing group" "File exists" mkdir "${root}/a"
 expect_eq "root listing with groups" "$(listing "${root}")" \
     "a c cgroup.controllers cgroup.procs cgroup.subtree_control"
 expect_eq "a listing, pids disabled" "$(listing "${root}/a")" \
-    "b cgroup.controllers cgroup.kill cgroup.procs cgroup.subtree_control"
+    "b cgroup.controllers cgroup.events cgroup.kill cgroup.procs cgroup.subtree_control"
 expect_eq "a cgroup.controllers, pids disabled" \
     "$(cat "${root}/a/cgroup.controllers")" ""
 expect_eq "a cgroup.subtree_control" \
@@ -172,7 +175,7 @@ expect_absent "${root}/pids.max"
 expect_eq "a cgroup.controllers, pids enabled" \
     "$(cat "${root}/a/cgroup.controllers")" "pids"
 expect_eq "a listing, pids enabled" "$(listing "${root}/a")" \
-    "b cgroup.controllers cgroup.kill cgroup.procs cgroup.subtree_control pids.current pids.max"
+    "b cgroup.controllers cgroup.events cgroup.kill cgroup.procs cgroup.subtree_control pids.current pids.max"
 expect_eq "a pids.max default" "$(cat "${root}/a/pids.max")" "max"
 expect_eq "a pids.current default" "$(cat "${root}/a/pids.current")" "0"
 expect_eq "c pids.max default" "$(cat "${root}/c/pids.max")" "max"
@@ -625,6 +628,95 @@ expect_error "rmdir of a jail's group" "Device busy" rmdir "${root}/j"
 wait "${pinned}" || true
 expect_jail "prison released with the zombie" cgpin no
 rmdir "${root}/j" || fail "rmdir after the jail went away"
+
+echo "--- events"
+# start_wait <kqueue|poll> <file> <seconds>: returns once cgwait is armed.
+start_wait() {
+	: >"${errfile}.ready"
+	"${CGWAIT}" "$1" "$2" "$3" >"${errfile}.wait" 2>"${errfile}.ready" &
+	waiter=$!
+	tries=0
+	until grep -q ready "${errfile}.ready"; do
+		tries=$((tries + 1))
+		if [ "${tries}" -ge 50 ]; then
+			fail "cgwait $1 $2 not ready: $(cat "${errfile}.ready")"
+			return 1
+		fi
+		sleep 0.1
+	done
+	# poll(2) registers inside the call, just after printing ready.
+	sleep 0.2
+}
+
+# finish_wait: sets outcome to the waiter's result.  It must run in this
+# shell, not in a command substitution: the waiter is our child.
+finish_wait() {
+	wait "${waiter}" || true
+	outcome=$(cat "${errfile}.wait")
+}
+
+# expect_populated <description> <group> <0|1>: exits are asynchronous.
+expect_populated() {
+	tries=0
+	while :; do
+		read -r value <"$2/cgroup.events"
+		[ "${value}" = "populated $3" ] && return 0
+		tries=$((tries + 1))
+		[ "${tries}" -lt 50 ] || break
+		sleep 0.1
+	done
+	fail "$1: '${value}', expected 'populated $3'"
+}
+
+[ -x "${CGWAIT}" ] || fail "missing ${CGWAIT}"
+write_file "${root}/cgroup.subtree_control" "+pids"
+mkdir "${root}/a" "${root}/a/b" "${root}/c" "${root}/d"
+expect_absent "${root}/cgroup.events"
+expect_populated "new group" "${root}/a" 0
+
+# A process in a descendant populates the ancestors; kqueue sees it.
+start_wait kqueue "${root}/a/cgroup.events" 5
+spawn_in "${root}/a/b"
+nested=$!
+finish_wait
+expect_eq "kqueue on a, member in a/b" "${outcome}" "write"
+expect_populated "a with a member in a/b" "${root}/a" 1
+expect_populated "a/b with a member" "${root}/a/b" 1
+
+# Activity elsewhere does not wake an unrelated group's waiter.
+start_wait kqueue "${root}/c/cgroup.events" 1
+spawn_in "${root}/a"
+member=$!
+finish_wait
+expect_eq "unrelated waiter" "${outcome}" "timeout"
+
+# poll(POLLPRI), as Linux programs wait, sees the subtree empty out.
+start_wait poll "${root}/a/cgroup.events" 5
+write_file "${root}/a/cgroup.kill" "1"
+finish_wait
+expect_eq "poll on a, subtree killed" "${outcome}" "pri"
+expect_populated "a after kill" "${root}/a" 0
+expect_populated "a/b after kill" "${root}/a/b" 0
+wait "${nested}" "${member}" || true
+
+# Removal is reported to kqueue waiters.
+start_wait kqueue "${root}/d/cgroup.events" 5
+rmdir "${root}/d"
+finish_wait
+expect_eq "kqueue on a removed group" "${outcome}" "delete"
+
+# Zombies do not populate a group, though they still count as pids.
+sh -c 'CG="$1" sh -c "echo 0 >\"\$CG/cgroup.procs\" && exec true" &
+    exec sleep 3' sh "${root}/a" &
+holder=$!
+expect_current "zombie counted as a pid" "${root}/a" 1
+expect_populated "zombie does not populate" "${root}/a" 0
+wait "${holder}" || true
+expect_current "zombie reaped" "${root}/a" 0
+
+rmdir "${root}/a/b" "${root}/a" "${root}/c"
+write_file "${root}/cgroup.subtree_control" "-pids"
+rm -f "${errfile}.ready" "${errfile}.wait"
 
 echo "--- leak check"
 group_baseline=$(malloc_count cgroup)

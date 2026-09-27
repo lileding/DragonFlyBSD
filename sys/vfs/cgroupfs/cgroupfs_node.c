@@ -45,6 +45,7 @@
 #include <sys/systm.h>
 #include <sys/cgroup.h>
 #include <sys/dirent.h>
+#include <sys/event.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -745,6 +746,20 @@ cgroupfs_node_file_write(struct cgroupfs_file *file, struct uio *uio,
 	if (error == 0 && changed)
 		cgroupfs_views_control_changed(cg);
 	return (error);
+}
+
+/*
+ * Every file is always ready for reading and writing; only files that
+ * report changes (cgroup.events) take change and exception filters.  The
+ * knote lives on the kernel group, which reaches every view.
+ */
+int
+cgroupfs_node_file_kqfilter(struct cgroupfs_file *file, struct knote *kn)
+{
+	if (!cgroupfs_file_notifies(file->index) &&
+	    kn->kn_filter != EVFILT_READ && kn->kn_filter != EVFILT_WRITE)
+		return (EOPNOTSUPP);
+	return (cgroup_events_kqfilter(file->node->cgroup, kn));
 }
 
 /* Unlocked hint for VOP_INACTIVE; the flag only turns true. */

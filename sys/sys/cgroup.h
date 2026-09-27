@@ -16,6 +16,7 @@
 #include <machine/limits.h>
 
 struct cgroup;
+struct knote;
 struct proc;
 struct ucred;
 
@@ -117,6 +118,17 @@ void		cgroup_proc_reap(struct proc *);
  * escapes.  EINVAL for the root, ENOENT for a removed group.
  */
 int		cgroup_kill(struct cgroup *);
+
+/*
+ * cgroup.events.  A group is populated while it or a descendant has a
+ * live process.  Waiters attach knotes to the group itself, so a change
+ * reaches every view and every opener: EVFILT_VNODE sees NOTE_WRITE when
+ * populated flips and NOTE_DELETE when the group is removed; EVFILT_EXCEPT
+ * (poll POLLPRI) fires on either; EVFILT_READ and EVFILT_WRITE are always
+ * ready.  A notification only says "changed": waiters read the file again.
+ */
+bool		cgroup_events_populated(const struct cgroup *);
+int		cgroup_events_kqfilter(struct cgroup *, struct knote *);
 
 /*
  * Jails: a prison pins its creator's group, which cannot be destroyed

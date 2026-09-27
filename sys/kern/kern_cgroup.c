@@ -35,6 +35,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/cgroup.h>
+#include <sys/event.h>
 #include <sys/kernel.h>
 #include <sys/socket.h>		/* struct prison embeds sockaddr_storage */
 #include <sys/jail.h>
@@ -74,6 +75,8 @@ struct cgroup {
 	volatile u_int		closed;
 	/* Prisons whose group this is; atomic. */
 	u_int			pins;
+	/* cgroup.events waiters. */
+	struct kqinfo		events;
 	/* Written under the exclusive lock, read locklessly by fork. */
 	u_int			pids_max;
 	/* Written under the exclusive lock; only turns true. */
@@ -161,6 +164,7 @@ cgroup_drop(struct cgroup *cg)
 		KKASSERT(cg != &cgroup_root_group);
 		KKASSERT(cg->dead);
 		KKASSERT(RB_EMPTY(&cg->children));
+		KKASSERT(SLIST_EMPTY(&cg->events.ki_note));
 		parent = cg->parent;
 		lockuninit(&cg->gate);
 		kfree(cg, M_CGROUP);
@@ -328,8 +332,10 @@ cgroup_destroy(struct cgroup *parent, const char *name, size_t namelen,
 	}
 	cgroup_unlock();
 
-	if (error == 0)
+	if (error == 0) {
+		KNOTE(&child->events.ki_note, NOTE_DELETE);
 		*childp = child;
+	}
 	return (error);
 }
 
@@ -383,11 +389,18 @@ cgroup_pids_sub(struct cgroup *cg, struct cgroup *stop)
 		atomic_add_int(&cg->pids, -1);
 }
 
+/*
+ * nlive flipping between zero and non-zero is a populated change.  Notes
+ * may arrive out of order under concurrency; each only means "re-read".
+ * KNOTE takes only pool tokens, so any caller's context is fine.
+ */
 static void
 cgroup_nlive_add(struct cgroup *cg, struct cgroup *stop)
 {
-	for (; cg != stop; cg = cg->parent)
-		atomic_add_int(&cg->nlive, 1);
+	for (; cg != stop; cg = cg->parent) {
+		if (atomic_fetchadd_int(&cg->nlive, 1) == 0)
+			KNOTE(&cg->events.ki_note, NOTE_WRITE);
+	}
 }
 
 /*
@@ -399,8 +412,11 @@ static void
 cgroup_nlive_sub(struct cgroup *cg, struct cgroup *stop)
 {
 	for (; cg != stop; cg = cg->parent) {
-		if (atomic_fetchadd_int(&cg->nlive, -1) == 1 && cg->closed)
+		if (atomic_fetchadd_int(&cg->nlive, -1) != 1)
+			continue;
+		if (cg->closed)
 			atomic_clear_int(&cg->closed, 1);
+		KNOTE(&cg->events.ki_note, NOTE_WRITE);
 	}
 }
 
@@ -802,4 +818,79 @@ cgroup_unpin(struct cgroup *cg)
 {
 	atomic_add_int(&cg->pins, -1);
 	cgroup_drop(cg);
+}
+
+bool
+cgroup_events_populated(const struct cgroup *cg)
+{
+	return (cg->nlive != 0);
+}
+
+static void
+filt_cgroup_detach(struct knote *kn)
+{
+	struct cgroup *cg = (struct cgroup *)kn->kn_hook;
+
+	knote_remove(&cg->events.ki_note, kn);
+}
+
+static int
+filt_cgroup_vnode(struct knote *kn, long hint)
+{
+	if (kn->kn_sfflags & hint)
+		kn->kn_fflags |= hint;
+	return (kn->kn_fflags != 0);
+}
+
+/* poll(POLLPRI) arrives as EVFILT_EXCEPT: any change is exceptional. */
+static int
+filt_cgroup_except(struct knote *kn, long hint)
+{
+	if (hint != 0)
+		kn->kn_fflags |= NOTE_OOB;
+	return (kn->kn_fflags != 0);
+}
+
+static int
+filt_cgroup_ready(struct knote *kn, long hint)
+{
+	(void)kn;
+	(void)hint;
+	return (1);
+}
+
+static struct filterops cgroup_vnode_filtops =
+	{ FILTEROP_ISFD | FILTEROP_MPSAFE,
+	  NULL, filt_cgroup_detach, filt_cgroup_vnode };
+static struct filterops cgroup_except_filtops =
+	{ FILTEROP_ISFD | FILTEROP_MPSAFE,
+	  NULL, filt_cgroup_detach, filt_cgroup_except };
+static struct filterops cgroup_ready_filtops =
+	{ FILTEROP_ISFD | FILTEROP_MPSAFE,
+	  NULL, filt_cgroup_detach, filt_cgroup_ready };
+
+/*
+ * The knote's file keeps its vnode, the view node and so this group alive
+ * until the knote is detached.
+ */
+int
+cgroup_events_kqfilter(struct cgroup *cg, struct knote *kn)
+{
+	switch (kn->kn_filter) {
+	case EVFILT_VNODE:
+		kn->kn_fop = &cgroup_vnode_filtops;
+		break;
+	case EVFILT_EXCEPT:
+		kn->kn_fop = &cgroup_except_filtops;
+		break;
+	case EVFILT_READ:
+	case EVFILT_WRITE:
+		kn->kn_fop = &cgroup_ready_filtops;
+		break;
+	default:
+		return (EOPNOTSUPP);
+	}
+	kn->kn_hook = (caddr_t)cg;
+	knote_insert(&cg->events.ki_note, kn);
+	return (0);
 }
