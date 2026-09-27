@@ -10,6 +10,13 @@
  *
  * Locking: a single hierarchy lock, ranked after every vnode and namecache
  * lock, protects topology, dead flags and control state.
+ *
+ * Membership: p_cgroup holds a group reference from process creation until
+ * the zombie is reaped; nprocs counts live members (until exit1()).  A
+ * process's p_cgroup changes only under its p_token without blocking, so
+ * fork's read-and-hold of the parent's group is atomic against migration
+ * and exit.  A live parent is itself counted in its group, which therefore
+ * cannot be destroyed underneath fork.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -17,8 +24,11 @@
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
+#include <sys/proc.h>
 #include <sys/refcount.h>
 #include <sys/tree.h>
+
+#include <machine/atomic.h>
 
 static MALLOC_DEFINE(M_CGROUP, "cgroup", "Control groups");
 
@@ -35,6 +45,8 @@ struct cgroup {
 	struct cgroup_children	children;
 	u_int			nchildren;
 	u_int			refs;
+	/* Live member processes; atomic. */
+	u_int			nprocs;
 	/* Written under the exclusive lock; only turns true. */
 	volatile int		dead;
 	uint64_t		id;
@@ -270,7 +282,7 @@ cgroup_destroy(struct cgroup *parent, const char *name, size_t namelen,
 	} else if ((child = cgroup_child_find(parent, name, namelen)) ==
 	    NULL) {
 		error = ENOENT;
-	} else if (!RB_EMPTY(&child->children)) {
+	} else if (!RB_EMPTY(&child->children) || child->nprocs != 0) {
 		error = EBUSY;
 	} else {
 		RB_REMOVE(cgroup_children, &parent->children, child);
@@ -311,4 +323,152 @@ cgroup_control_update(struct cgroup *cg, uint32_t enable, uint32_t disable,
 	}
 	cgroup_unlock();
 	return (error);
+}
+
+void
+cgroup_proc_init0(struct proc *p)
+{
+	struct cgroup *root = &cgroup_root_group;
+
+	KKASSERT(p->p_cgroup == NULL);
+	cgroup_hold(root);
+	atomic_add_int(&root->nprocs, 1);
+	p->p_cgroup = root;
+}
+
+int
+cgroup_proc_fork(struct proc *parent, struct cgroup **cgp)
+{
+	struct cgroup *cg;
+
+	/* Nothing below blocks, so parent's p_token stays held throughout. */
+	if (parent->p_flags & P_WEXIT)
+		return (EAGAIN);
+	cg = parent->p_cgroup;
+	KKASSERT(cg != NULL);
+	cgroup_hold(cg);
+	atomic_add_int(&cg->nprocs, 1);
+	*cgp = cg;
+	return (0);
+}
+
+void
+cgroup_proc_exit(struct proc *p)
+{
+	KKASSERT(p->p_flags & P_WEXIT);
+	atomic_add_int(&p->p_cgroup->nprocs, -1);
+}
+
+void
+cgroup_proc_reap(struct proc *p)
+{
+	struct cgroup *cg = p->p_cgroup;
+
+	p->p_cgroup = NULL;
+	cgroup_drop(cg);
+}
+
+/*
+ * The hierarchy lock is taken before p_token: an LWKT token is released
+ * while its holder blocks, so nothing may block inside the token section.
+ * Holding the hierarchy lock serializes against destroy.
+ */
+int
+cgroup_proc_migrate(struct cgroup *cg, pid_t pid, struct ucred *cred)
+{
+	struct cgroup *old;
+	struct proc *p;
+	int error;
+
+	if (pid == 0) {
+		p = curproc;
+		PHOLD(p);
+	} else {
+		p = pfind(pid);
+		if (p == NULL)
+			return (ESRCH);
+	}
+	if (p->p_flags & P_SYSTEM) {
+		error = EINVAL;
+		goto out;
+	}
+	error = p_trespass(cred, p->p_ucred);
+	if (error != 0)
+		goto out;
+
+	old = NULL;
+	cgroup_lock_exclusive();
+	if (cg->dead) {
+		error = ENOENT;
+	} else {
+		lwkt_gettoken(&p->p_token);
+		if (p->p_flags & P_WEXIT) {
+			error = ESRCH;
+		} else if (p->p_cgroup != cg) {
+			old = p->p_cgroup;
+			cgroup_hold(cg);
+			atomic_add_int(&cg->nprocs, 1);
+			p->p_cgroup = cg;
+			atomic_add_int(&old->nprocs, -1);
+		}
+		lwkt_reltoken(&p->p_token);
+	}
+	cgroup_unlock();
+	if (old != NULL)
+		cgroup_drop(old);
+out:
+	PRELE(p);
+	return (error);
+}
+
+struct cgroup_procs_scan {
+	struct cgroup	*cgroup;
+	pid_t		*pids;
+	u_int		count;
+	u_int		capacity;
+	bool		overflow;
+};
+
+/* p_cgroup is only compared, so an unlocked snapshot suffices. */
+static int
+cgroup_procs_scan_callback(struct proc *p, void *data)
+{
+	struct cgroup_procs_scan *scan = data;
+
+	if (p->p_cgroup != scan->cgroup || p->p_stat == SIDL)
+		return (0);
+	if (scan->count == scan->capacity) {
+		scan->overflow = true;
+		return (-1);
+	}
+	scan->pids[scan->count++] = p->p_pid;
+	return (0);
+}
+
+void
+cgroup_procs_snapshot(struct cgroup *cg, pid_t **pidsp, u_int *countp)
+{
+	struct cgroup_procs_scan scan;
+
+	scan.cgroup = cg;
+	scan.capacity = cg->nprocs + 16;
+	for (;;) {
+		scan.pids = kmalloc(sizeof(*scan.pids) * scan.capacity,
+		    M_CGROUP, M_WAITOK);
+		scan.count = 0;
+		scan.overflow = false;
+		allproc_scan(cgroup_procs_scan_callback, &scan, 0);
+		if (!scan.overflow)
+			break;
+		kfree(scan.pids, M_CGROUP);
+		scan.capacity *= 2;
+	}
+	*pidsp = scan.pids;
+	*countp = scan.count;
+}
+
+void
+cgroup_procs_free(pid_t *pids)
+{
+	kfree(pids, M_CGROUP);
 }

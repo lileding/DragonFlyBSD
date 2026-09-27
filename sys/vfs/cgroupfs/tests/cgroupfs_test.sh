@@ -21,7 +21,8 @@ cleanup() {
 		is_mounted "${dir}" && umount -f "${dir}" || true
 	done
 	if mount -t cgroupfs cgroupfs "${mountpoint}"; then
-		for group in a/b a c x y z; do
+		printf '%s\n' "$$" >"${mountpoint}/cgroup.procs" || true
+		for group in a/b a b c x y z; do
 			[ -d "${mountpoint}/${group}" ] &&
 			    rmdir "${mountpoint}/${group}" || true
 		done
@@ -69,6 +70,15 @@ listing() {
 	ls "$1" | tr '\n' ' ' | sed 's/ $//'
 }
 
+# expect_member <group directory> <pid>
+expect_member() {
+	grep -qx "$2" "$1/cgroup.procs" || fail "pid $2 not in $1"
+}
+
+expect_not_member() {
+	! grep -qx "$2" "$1/cgroup.procs" || fail "pid $2 unexpectedly in $1"
+}
+
 # dd reports the write(2) errno text; printf only says "write error".
 write_file() {
 	printf '%s\n' "$2" | dd of="$1" 2>"${errfile}.dd" ||
@@ -96,7 +106,8 @@ expect_eq "root listing" "$(listing "${root}")" \
 expect_eq "root cgroup.controllers" "$(cat "${root}/cgroup.controllers")" "pids"
 expect_eq "root cgroup.subtree_control" \
     "$(cat "${root}/cgroup.subtree_control")" ""
-expect_eq "root cgroup.procs" "$(cat "${root}/cgroup.procs")" ""
+expect_member "${root}" 1
+expect_member "${root}" "$$"
 expect_absent "${root}/pids.max"
 expect_absent "${root}/pids.current"
 
@@ -262,6 +273,53 @@ expect_absent "${root}/z"
 expect_absent "${other}/z"
 umount "${other}" || fail "unmount second mount"
 
+echo "--- membership"
+mkdir "${root}/a" "${root}/b"
+write_file "${root}/a/cgroup.procs" "$$"
+expect_member "${root}/a" "$$"
+expect_not_member "${root}" "$$"
+sleep 60 &
+member=$!
+expect_member "${root}/a" "${member}"
+mount -t cgroupfs cgroupfs "${other}"
+expect_member "${other}/a" "$$"
+expect_member "${other}/a" "${member}"
+umount "${other}"
+# "0" moves the writer only: the subshell lists itself in b, while this
+# shell stays in a.
+joined=$(sh -c "echo 0 >'${root}/b/cgroup.procs' && echo \$\$ &&
+    cat '${root}/b/cgroup.procs'") || fail "writing 0 to cgroup.procs"
+self=$(printf '%s\n' "${joined}" | sed -n 1p)
+printf '%s\n' "${joined}" | sed 1d | grep -qx "${self}" ||
+    fail "writing 0 did not move the writer"
+expect_not_member "${root}/b" "$$"
+expect_member "${root}/a" "$$"
+expect_error "rmdir group with members" "Device busy" rmdir "${root}/a"
+expect_error "migrate malformed pid" "Invalid argument" \
+    write_file "${root}/b/cgroup.procs" "abc"
+expect_error "migrate two pids" "Invalid argument" \
+    write_file "${root}/b/cgroup.procs" "1 2"
+expect_error "migrate empty" "Invalid argument" \
+    write_file "${root}/b/cgroup.procs" ""
+expect_error "migrate missing pid" "No such process" \
+    write_file "${root}/b/cgroup.procs" "999999"
+mkdir "${root}/c"
+exec 3>"${root}/c/cgroup.procs"
+rmdir "${root}/c"
+if printf '%s\n' "$$" >&3; then
+	fail "migrate into removed group: unexpectedly succeeded"
+fi
+exec 3>&-
+expect_member "${root}/a" "$$"
+kill "${member}"
+wait "${member}" || true
+expect_not_member "${root}/a" "${member}"
+write_file "${root}/cgroup.procs" "$$"
+expect_member "${root}" "$$"
+expect_not_member "${root}/a" "$$"
+rmdir "${root}/a" || fail "rmdir after members left"
+rmdir "${root}/b" || fail "rmdir after subshell exited"
+
 echo "--- leak check"
 group_baseline=$(malloc_count cgroup)
 view_baseline=$(malloc_count cgroupfs)
@@ -272,6 +330,12 @@ while [ "${iteration}" -lt 50 ]; do
 	write_file "${root}/cgroup.subtree_control" "+pids"
 	cat "${root}/a/pids.max" "${other}/a/b/cgroup.controllers" >/dev/null
 	write_file "${other}/cgroup.subtree_control" "-pids"
+	write_file "${other}/a/b/cgroup.procs" "$$"
+	sleep 30 &
+	member=$!
+	write_file "${root}/cgroup.procs" "$$"
+	kill "${member}"
+	wait "${member}" || true
 	rmdir "${other}/a/b" "${root}/a"
 	iteration=$((iteration + 1))
 done

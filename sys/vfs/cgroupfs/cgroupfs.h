@@ -20,6 +20,8 @@ struct cgroup;
 struct cgroup_control;
 struct mount;
 struct nchandle;
+struct sbuf;
+struct ucred;
 struct uio;
 struct vnode;
 struct vop_ops;
@@ -73,7 +75,8 @@ void	cgroupfs_node_reclaim(struct cgroupfs_node *, struct vnode *);
 void	cgroupfs_node_file_attr(const struct cgroupfs_file *, ino_t *,
 	    mode_t *);
 int	cgroupfs_node_file_read(struct cgroupfs_file *, struct uio *);
-int	cgroupfs_node_file_write(struct cgroupfs_file *, struct uio *);
+int	cgroupfs_node_file_write(struct cgroupfs_file *, struct uio *,
+	    struct ucred *);
 bool	cgroupfs_node_file_is_dead(const struct cgroupfs_file *);
 void	cgroupfs_node_file_reclaim(struct cgroupfs_file *, struct vnode *);
 
@@ -86,6 +89,7 @@ void	cgroupfs_vnode_finalize(struct vnode *);
  */
 
 #define CGROUPFS_FILE_COUNT	5
+/* Largest accepted write. */
 #define CGROUPFS_FILE_SIZE_MAX	128
 
 const char	*cgroupfs_file_name(u_int);
@@ -93,11 +97,17 @@ mode_t		cgroupfs_file_mode(u_int);
 /* Index of the interface file with this name, or -1. */
 int		cgroupfs_file_find(const char *, size_t);
 bool		cgroupfs_file_present(u_int, const struct cgroup_control *);
-/* Formats the file content; the buffer holds CGROUPFS_FILE_SIZE_MAX. */
-int		cgroupfs_file_load(u_int, const struct cgroup_control *,
-		    char *, size_t *);
-/* Applies a write; only for files whose mode grants write access. */
+/*
+ * Formats the file content into an auto-extending sbuf.  Called without
+ * the hierarchy lock, with a control snapshot taken under it.
+ */
+int		cgroupfs_file_load(u_int, struct cgroup *,
+		    const struct cgroup_control *, struct sbuf *);
+/*
+ * Applies a write on behalf of cred; only for files whose mode grants
+ * write access.  Reports whether the namespace-visible control changed.
+ */
 int		cgroupfs_file_store(u_int, struct cgroup *, const char *,
-		    size_t, bool *);
+		    size_t, struct ucred *, bool *);
 
 #endif /* _VFS_CGROUPFS_CGROUPFS_H_ */

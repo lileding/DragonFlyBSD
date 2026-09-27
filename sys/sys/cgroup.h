@@ -15,6 +15,8 @@
 #include <sys/types.h>
 
 struct cgroup;
+struct proc;
+struct ucred;
 
 #define CGROUP_CONTROLLER_PIDS	0x00000001U
 
@@ -81,5 +83,29 @@ int		cgroup_destroy(struct cgroup *, const char *, size_t,
 		    struct cgroup **);
 int		cgroup_control_update(struct cgroup *, uint32_t, uint32_t,
 		    bool *);
+
+/*
+ * Process membership.  Every process belongs to exactly one group through
+ * p_cgroup, which holds a reference from creation until the zombie is
+ * reaped.  p_cgroup changes only under the process's p_token, without
+ * blocking in between.
+ */
+
+/* proc0 joins the root group. */
+void		cgroup_proc_init0(struct proc *);
+/*
+ * fork1(), parent's p_token held: returns the parent's group, held and
+ * counted, for the child.  Fails only for an exiting parent.
+ */
+int		cgroup_proc_fork(struct proc *, struct cgroup **);
+/* exit1(), p_token held and P_WEXIT set: the process stops counting. */
+void		cgroup_proc_exit(struct proc *);
+/* The zombie is reaped: releases its group. */
+void		cgroup_proc_reap(struct proc *);
+/* Moves process pid (0: the caller) into the group. */
+int		cgroup_proc_migrate(struct cgroup *, pid_t, struct ucred *);
+/* Live members' pids; free the array with cgroup_procs_free(). */
+void		cgroup_procs_snapshot(struct cgroup *, pid_t **, u_int *);
+void		cgroup_procs_free(pid_t *);
 
 #endif /* _SYS_CGROUP_H_ */

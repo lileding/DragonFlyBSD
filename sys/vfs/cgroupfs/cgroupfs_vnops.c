@@ -80,7 +80,8 @@ cgroupfs_vop_write(struct vop_write_args *ap)
 {
 	if (ap->a_vp->v_type == VDIR)
 		return (EISDIR);
-	return (cgroupfs_node_file_write(ap->a_vp->v_data, ap->a_uio));
+	return (cgroupfs_node_file_write(ap->a_vp->v_data, ap->a_uio,
+	    ap->a_cred));
 }
 
 /*

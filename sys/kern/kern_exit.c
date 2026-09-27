@@ -38,6 +38,7 @@
 #include "opt_ktrace.h"
 
 #include <sys/param.h>
+#include <sys/cgroup.h>
 #include <sys/systm.h>
 #include <sys/sysmsg.h>
 #include <sys/kernel.h>
@@ -529,6 +530,12 @@ exit1(int rv)
 	pp = p->p_pptr;
 	atomic_add_long(&pp->p_waitgen, 1);
 	pp = NULL;
+
+	/*
+	 * Stop counting as a live member of our control group.  The group
+	 * reference is kept until the zombie is reaped.
+	 */
+	cgroup_proc_exit(p);
 
 	/*
 	 * release controlled reaper for exit if we own it and return the
@@ -1278,6 +1285,7 @@ loop:
 			 * Decrement the count of procs running with this uid.
 			 */
 			chgproccnt(p->p_ucred->cr_ruidinfo, -1, 0);
+			cgroup_proc_reap(p);
 
 			/*
 			 * Free up credentials.  p_spin is required to

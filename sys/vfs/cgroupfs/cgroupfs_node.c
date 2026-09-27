@@ -50,6 +50,7 @@
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/namecache.h>
+#include <sys/sbuf.h>
 #include <sys/spinlock2.h>
 #include <sys/stat.h>
 #include <sys/tree.h>
@@ -681,39 +682,48 @@ cgroupfs_node_file_attr(const struct cgroupfs_file *file, ino_t *inodep,
 }
 
 /*
- * Stale vnodes (removed group, controller disabled) read as ENOENT.  The
- * content is formatted under the lock and copied out after releasing it.
+ * Stale vnodes (removed group, controller disabled) read as ENOENT.
+ * Visibility and the control snapshot are taken under the lock; the
+ * content, which may be long (cgroup.procs), is formatted after it is
+ * released.  Each read regenerates the whole file.
  */
 int
 cgroupfs_node_file_read(struct cgroupfs_file *file, struct uio *uio)
 {
 	struct cgroup *cg = file->node->cgroup;
 	struct cgroup_control control;
-	char buffer[CGROUPFS_FILE_SIZE_MAX];
-	size_t length;
+	struct sbuf *sb;
+	ssize_t length;
+	bool visible;
 	int error;
 
 	if (uio->uio_offset < 0)
 		return (EINVAL);
 	cgroup_lock_shared();
-	if (!cgroupfs_file_visible_locked(cg, file->index)) {
-		error = ENOENT;
-	} else {
+	visible = cgroupfs_file_visible_locked(cg, file->index);
+	if (visible)
 		cgroup_control(cg, &control);
-		error = cgroupfs_file_load(file->index, &control, buffer,
-		    &length);
-	}
 	cgroup_unlock();
-	if (error != 0)
-		return (error);
-	if (uio->uio_offset >= (off_t)length)
-		return (0);
-	return (uiomove(buffer + uio->uio_offset,
-	    length - (size_t)uio->uio_offset, uio));
+	if (!visible)
+		return (ENOENT);
+
+	sb = sbuf_new_auto();
+	error = cgroupfs_file_load(file->index, cg, &control, sb);
+	if (error == 0 && sbuf_finish(sb) != 0)
+		error = ENOMEM;
+	if (error == 0) {
+		length = sbuf_len(sb);
+		if (uio->uio_offset < length)
+			error = uiomove(sbuf_data(sb) + uio->uio_offset,
+			    length - uio->uio_offset, uio);
+	}
+	sbuf_delete(sb);
+	return (error);
 }
 
 int
-cgroupfs_node_file_write(struct cgroupfs_file *file, struct uio *uio)
+cgroupfs_node_file_write(struct cgroupfs_file *file, struct uio *uio,
+    struct ucred *cred)
 {
 	struct cgroup *cg = file->node->cgroup;
 	char buffer[CGROUPFS_FILE_SIZE_MAX];
@@ -730,7 +740,7 @@ cgroupfs_node_file_write(struct cgroupfs_file *file, struct uio *uio)
 	error = uiomove(buffer, length, uio);
 	if (error != 0)
 		return (error);
-	error = cgroupfs_file_store(file->index, cg, buffer, length,
+	error = cgroupfs_file_store(file->index, cg, buffer, length, cred,
 	    &changed);
 	if (error == 0 && changed)
 		cgroupfs_views_control_changed(cg);

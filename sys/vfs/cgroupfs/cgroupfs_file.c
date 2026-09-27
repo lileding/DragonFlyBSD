@@ -12,13 +12,15 @@
 #include <sys/systm.h>
 #include <sys/cgroup.h>
 #include <sys/kernel.h>
+#include <sys/proc.h>
+#include <sys/sbuf.h>
 
 #include "cgroupfs.h"
 
-typedef int (*cgroupfs_file_load_t)(const struct cgroup_control *, char *,
-	size_t *);
+typedef int (*cgroupfs_file_load_t)(struct cgroup *,
+	const struct cgroup_control *, struct sbuf *);
 typedef int (*cgroupfs_file_store_t)(struct cgroup *, const char *, size_t,
-	bool *);
+	struct ucred *, bool *);
 
 struct cgroupfs_file_desc {
 	const char		*name;
@@ -30,22 +32,24 @@ struct cgroupfs_file_desc {
 	cgroupfs_file_store_t	store;
 };
 
-static int cgroupfs_load_controllers(const struct cgroup_control *, char *,
-	size_t *);
-static int cgroupfs_load_subtree_control(const struct cgroup_control *,
-	char *, size_t *);
-static int cgroupfs_load_empty(const struct cgroup_control *, char *,
-	size_t *);
-static int cgroupfs_load_max(const struct cgroup_control *, char *,
-	size_t *);
-static int cgroupfs_load_zero(const struct cgroup_control *, char *,
-	size_t *);
+static int cgroupfs_load_controllers(struct cgroup *,
+	const struct cgroup_control *, struct sbuf *);
+static int cgroupfs_load_procs(struct cgroup *, const struct cgroup_control *,
+	struct sbuf *);
+static int cgroupfs_load_subtree_control(struct cgroup *,
+	const struct cgroup_control *, struct sbuf *);
+static int cgroupfs_load_max(struct cgroup *, const struct cgroup_control *,
+	struct sbuf *);
+static int cgroupfs_load_zero(struct cgroup *, const struct cgroup_control *,
+	struct sbuf *);
+static int cgroupfs_store_procs(struct cgroup *, const char *, size_t,
+	struct ucred *, bool *);
 static int cgroupfs_store_subtree_control(struct cgroup *, const char *,
-	size_t, bool *);
+	size_t, struct ucred *, bool *);
 
 static const struct cgroupfs_file_desc cgroupfs_files[] = {
 	{ "cgroup.controllers", 0444, 0, cgroupfs_load_controllers, NULL },
-	{ "cgroup.procs", 0444, 0, cgroupfs_load_empty, NULL },
+	{ "cgroup.procs", 0644, 0, cgroupfs_load_procs, cgroupfs_store_procs },
 	{ "cgroup.subtree_control", 0644, 0, cgroupfs_load_subtree_control,
 	    cgroupfs_store_subtree_control },
 	{ "pids.current", 0444, CGROUP_CONTROLLER_PIDS, cgroupfs_load_zero,
@@ -100,20 +104,22 @@ cgroupfs_file_present(u_int index, const struct cgroup_control *control)
 }
 
 int
-cgroupfs_file_load(u_int index, const struct cgroup_control *control,
-    char *buffer, size_t *lengthp)
+cgroupfs_file_load(u_int index, struct cgroup *cg,
+    const struct cgroup_control *control, struct sbuf *sb)
 {
 	KKASSERT(index < nitems(cgroupfs_files));
-	return (cgroupfs_files[index].load(control, buffer, lengthp));
+	return (cgroupfs_files[index].load(cg, control, sb));
 }
 
 int
 cgroupfs_file_store(u_int index, struct cgroup *cg, const char *buffer,
-    size_t length, bool *changedp)
+    size_t length, struct ucred *cred, bool *changedp)
 {
 	KKASSERT(index < nitems(cgroupfs_files));
 	KKASSERT(cgroupfs_files[index].store != NULL);
-	return (cgroupfs_files[index].store(cg, buffer, length, changedp));
+	*changedp = false;
+	return (cgroupfs_files[index].store(cg, buffer, length, cred,
+	    changedp));
 }
 
 static bool
@@ -124,81 +130,100 @@ cgroupfs_is_space(char c)
 
 /* Space-separated controller names in table order, newline terminated. */
 static int
-cgroupfs_format_mask(uint32_t mask, char *buffer, size_t *lengthp)
+cgroupfs_format_mask(uint32_t mask, struct sbuf *sb)
 {
-	size_t length;
+	const char *separator;
 	u_int index;
-	int written;
 
-	length = 0;
+	separator = "";
 	for (index = 0; index < cgroup_ncontrollers; ++index) {
 		if ((mask & cgroup_controllers[index].bit) == 0)
 			continue;
-		written = ksnprintf(buffer + length,
-		    CGROUPFS_FILE_SIZE_MAX - length, "%s%s",
-		    length == 0 ? "" : " ", cgroup_controllers[index].name);
-		if (written < 0 ||
-		    (size_t)written >= CGROUPFS_FILE_SIZE_MAX - length)
-			return (EOVERFLOW);
-		length += written;
+		sbuf_printf(sb, "%s%s", separator,
+		    cgroup_controllers[index].name);
+		separator = " ";
 	}
-	if (length + 1 >= CGROUPFS_FILE_SIZE_MAX)
-		return (EOVERFLOW);
-	buffer[length++] = '\n';
-	*lengthp = length;
+	sbuf_printf(sb, "\n");
 	return (0);
 }
 
 static int
-cgroupfs_format_text(const char *text, char *buffer, size_t *lengthp)
+cgroupfs_load_controllers(struct cgroup *cg,
+    const struct cgroup_control *control, struct sbuf *sb)
 {
-	size_t length;
+	(void)cg;
+	return (cgroupfs_format_mask(control->available, sb));
+}
 
-	length = strlen(text);
-	KKASSERT(length < CGROUPFS_FILE_SIZE_MAX);
-	bcopy(text, buffer, length);
-	*lengthp = length;
+static int
+cgroupfs_load_subtree_control(struct cgroup *cg,
+    const struct cgroup_control *control, struct sbuf *sb)
+{
+	(void)cg;
+	return (cgroupfs_format_mask(control->subtree_control, sb));
+}
+
+static int
+cgroupfs_load_procs(struct cgroup *cg, const struct cgroup_control *control,
+    struct sbuf *sb)
+{
+	pid_t *pids;
+	u_int count;
+	u_int index;
+
+	(void)control;
+	cgroup_procs_snapshot(cg, &pids, &count);
+	for (index = 0; index < count; ++index)
+		sbuf_printf(sb, "%d\n", pids[index]);
+	cgroup_procs_free(pids);
 	return (0);
 }
 
 static int
-cgroupfs_load_controllers(const struct cgroup_control *control,
-    char *buffer, size_t *lengthp)
+cgroupfs_load_max(struct cgroup *cg, const struct cgroup_control *control,
+    struct sbuf *sb)
 {
-	return (cgroupfs_format_mask(control->available, buffer, lengthp));
-}
-
-static int
-cgroupfs_load_subtree_control(const struct cgroup_control *control,
-    char *buffer, size_t *lengthp)
-{
-	return (cgroupfs_format_mask(control->subtree_control, buffer,
-	    lengthp));
-}
-
-/* Process membership does not exist yet. */
-static int
-cgroupfs_load_empty(const struct cgroup_control *control, char *buffer,
-    size_t *lengthp)
-{
+	(void)cg;
 	(void)control;
-	return (cgroupfs_format_text("", buffer, lengthp));
+	sbuf_printf(sb, "max\n");
+	return (0);
 }
 
 static int
-cgroupfs_load_max(const struct cgroup_control *control, char *buffer,
-    size_t *lengthp)
+cgroupfs_load_zero(struct cgroup *cg, const struct cgroup_control *control,
+    struct sbuf *sb)
 {
+	(void)cg;
 	(void)control;
-	return (cgroupfs_format_text("max\n", buffer, lengthp));
+	sbuf_printf(sb, "0\n");
+	return (0);
 }
 
+/*
+ * One decimal pid per write, optionally newline terminated; 0 names the
+ * writer.  Migration changes no directory entry.
+ */
 static int
-cgroupfs_load_zero(const struct cgroup_control *control, char *buffer,
-    size_t *lengthp)
+cgroupfs_store_procs(struct cgroup *cg, const char *buffer, size_t length,
+    struct ucred *cred, bool *changedp)
 {
-	(void)control;
-	return (cgroupfs_format_text("0\n", buffer, lengthp));
+	pid_t pid;
+	size_t position;
+
+	(void)changedp;
+	if (length > 0 && buffer[length - 1] == '\n')
+		--length;
+	if (length == 0)
+		return (EINVAL);
+	pid = 0;
+	for (position = 0; position < length; ++position) {
+		if (buffer[position] < '0' || buffer[position] > '9')
+			return (EINVAL);
+		pid = pid * 10 + (buffer[position] - '0');
+		if (pid > PID_MAX)
+			return (ESRCH);
+	}
+	return (cgroup_proc_migrate(cg, pid, cred));
 }
 
 /*
@@ -208,7 +233,7 @@ cgroupfs_load_zero(const struct cgroup_control *control, char *buffer,
  */
 static int
 cgroupfs_store_subtree_control(struct cgroup *cg, const char *buffer,
-    size_t length, bool *changedp)
+    size_t length, struct ucred *cred, bool *changedp)
 {
 	uint32_t enable;
 	uint32_t disable;
@@ -217,6 +242,7 @@ cgroupfs_store_subtree_control(struct cgroup *cg, const char *buffer,
 	size_t start;
 	char sign;
 
+	(void)cred;
 	enable = 0;
 	disable = 0;
 	position = 0;

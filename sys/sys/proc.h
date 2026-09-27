@@ -153,6 +153,7 @@ struct vkernel_lwp;
 struct vmspace_entry;
 struct ktrace_node;
 struct sem_undo;
+struct cgroup;
 
 struct lwp {
 	TAILQ_ENTRY(lwp) lwp_procq;	/* run/sleep queue. */
@@ -336,7 +337,8 @@ struct	proc {
 	struct sysreaper *p_reaper;	/* reaper control */
 	int		p_deathsig;	/* signal us on parent death */
 	unsigned int	p_reaptid;	/* reaping transaction id */
-	void		*p_reserveds[2]; /* reserved for future */
+	struct cgroup	*p_cgroup;	/* control group, held until reaped */
+	void		*p_reserved1;	/* reserved for future */
 };
 
 #define lwp_wchan	lwp_thread->td_wchan

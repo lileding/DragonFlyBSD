@@ -41,6 +41,7 @@
 #include "opt_init_path.h"
 
 #include <sys/param.h>
+#include <sys/cgroup.h>
 #include <sys/file.h>
 #include <sys/filedesc.h>
 #include <sys/kernel.h>
@@ -166,6 +167,7 @@ mi_proc0init(struct globaldata *gd, struct user *proc0paddr)
 	RB_INIT(&proc0.p_lwp_tree);
 	spin_init(&proc0.p_spin, "iproc_proc0");
 	lwkt_token_init(&proc0.p_token, "iproc");
+	cgroup_proc_init0(&proc0);
 	lwp0.lwp_tid = 1;
 	proc0.p_lasttid = lwp0.lwp_tid;	/* +1 = next TID */
 	lwp_rb_tree_RB_INSERT(&proc0.p_lwp_tree, &lwp0);

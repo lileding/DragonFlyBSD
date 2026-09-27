@@ -38,6 +38,7 @@
 #include "opt_ktrace.h"
 
 #include <sys/param.h>
+#include <sys/cgroup.h>
 #include <sys/systm.h>
 #include <sys/sysmsg.h>
 #include <sys/filedesc.h>
@@ -311,6 +312,7 @@ fork1(struct lwp *lp1, int flags, struct proc **procp)
 	struct pgrp *plkgrp;
 	struct lwp  *lp2;
 	struct sysreaper *reap;
+	struct cgroup *cg;
 	uid_t uid;
 	int ok, error;
 	static int curfail = 0;
@@ -439,6 +441,17 @@ fork1(struct lwp *lp1, int flags, struct proc **procp)
 	}
 
 	/*
+	 * Charge the parent's control group for the child.  This only fails
+	 * for an exiting parent, so the child never joins a removed group.
+	 */
+	error = cgroup_proc_fork(p1, &cg);
+	if (error != 0) {
+		chgproccnt(lp1->lwp_thread->td_ucred->cr_ruidinfo, -1, 0);
+		atomic_add_int(&nprocs, -1);
+		goto done;
+	}
+
+	/*
 	 * Allocate a new process, don't get fancy: zero the structure.
 	 */
 	p2 = kmalloc(sizeof(struct proc), M_PROC, M_WAITOK|M_ZERO);
@@ -467,6 +480,9 @@ fork1(struct lwp *lp1, int flags, struct proc **procp)
 	} else {
 		p2->p_reaper = NULL;
 	}
+
+	/* Set before the process becomes visible on the allproc list. */
+	p2->p_cgroup = cg;
 
 	RB_INIT(&p2->p_lwp_tree);
 	spin_init(&p2->p_spin, "procfork1");
